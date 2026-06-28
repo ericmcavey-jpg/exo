@@ -1,4 +1,5 @@
 import hashlib
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -409,12 +410,22 @@ class Worker:
 
     async def _create_supervisor(self, task: CreateRunner) -> RunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""
+        runner_id = task.bound_instance.bound_runner_id
+        logger.info(
+            f"Creating runner supervisor runner_id={runner_id} "
+            f"node_id={self.node_id} instance_id={task.instance_id} "
+            f"bound_node_id={task.bound_instance.bound_node_id}"
+        )
         runner = await RunnerSupervisor.create(
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
         )
-        self.runners[task.bound_instance.bound_runner_id] = runner
+        self.runners[runner_id] = runner
         self._tg.start_soon(runner.run)
+        logger.info(
+            f"Runner supervisor started runner_id={runner_id} "
+            f"local_runner_count={len(self.runners)}"
+        )
         return runner
 
     async def _poll_connection_updates(self):
@@ -446,6 +457,20 @@ class Worker:
                             conn=Connection(source=self.node_id, sink=nid, edge=edge)
                         )
                     )
+                    advertise_ip = os.getenv("EXO_ADVERTISE_IP", "").strip()
+                    if advertise_ip:
+                        reverse_edge = SocketConnection(
+                            sink_multiaddr=Multiaddr(
+                                address=f"/ip4/{advertise_ip}/tcp/{self.api_port}"
+                            )
+                        )
+                        await self.event_sender.send(
+                            TopologyEdgeCreated(
+                                conn=Connection(
+                                    source=nid, sink=self.node_id, edge=reverse_edge
+                                )
+                            )
+                        )
 
             for conn in self.state.topology.out_edges(self.node_id):
                 if not isinstance(conn.edge, SocketConnection):
