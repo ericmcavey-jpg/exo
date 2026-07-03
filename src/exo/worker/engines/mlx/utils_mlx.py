@@ -285,8 +285,9 @@ def shard_and_load(
                 "this metadata type is only for image generation models"
             )
 
-    # TODO: Do we need this?
-    mx.eval(model)
+    # NOTE: redundant full mx.eval(model) removed (2026-07-02): params are already
+    # evaluated per-layer during pipeline_auto_parallel; re-touching every buffer
+    # in one burst forced residency spikes that triggered Metal OOM on 96GB nodes.
 
     logger.debug("SHARDED")
     logger.debug(model)
