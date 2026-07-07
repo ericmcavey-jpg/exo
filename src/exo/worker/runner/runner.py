@@ -1,5 +1,6 @@
 import queue
 import threading
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -281,7 +282,10 @@ class Runner:
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
 
-                self.generator.warmup()
+                if os.environ.get("EXO_SKIP_WARMUP") == "1":
+                    logger.info("skipping runner warmup because EXO_SKIP_WARMUP=1")
+                else:
+                    self.generator.warmup()
 
                 logger.info(
                     f"runner initialized in {time.time() - self.setup_start_time} seconds"

@@ -235,7 +235,16 @@ def shard_and_load(
 ) -> Generator[ModelLoadingResponse, None, tuple[nn.Module, TokenizerWrapper]]:
     model_path = build_model_path(shard_metadata.model_card.model_id)
 
-    model, _ = load_model(model_path, lazy=True, strict=False)
+    # Materializing this model's lazily-built weight/dequantization graph
+    # (e.g. via the per-layer mx.eval() calls in pipeline_auto_parallel)
+    # can exceed Metal's hard ~5s command-buffer timeout for architectures
+    # with unusually large per-layer tensors (DeepSeek-V4's MoE experts).
+    # mx.stream() only affects ops created *inside* its context -- it does
+    # not retroactively move already-built graph nodes to a new stream --
+    # so the CPU stream must be set here, at actual array/op construction
+    # time, not just around the later mx.eval() call.
+    with mx.stream(mx.cpu):
+        model, _ = load_model(model_path, lazy=True, strict=False)
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass
@@ -834,7 +843,7 @@ def mx_any(bool_: bool, group: mx.distributed.Group | None) -> bool:
     if group is None:
         return bool_
     num_true = mx.distributed.all_sum(
-        mx.array(bool_), group=group, stream=mx.default_stream(mx.Device(mx.cpu))
+        mx.array(bool_), group=group, stream=mx.cpu
     )
     mx.eval(num_true)
     return num_true.item() > 0
@@ -845,7 +854,7 @@ def mx_barrier(group: mx.distributed.Group | None):
         return
     mx.eval(
         mx.distributed.all_sum(
-            mx.array(1.0), group=group, stream=mx.default_stream(mx.Device(mx.cpu))
+            mx.array(1.0), group=group, stream=mx.cpu
         )
     )
 
@@ -905,7 +914,7 @@ def mx_all_gather_tasks(
     n_tasks = len(tasks)
     all_counts = cast(
         list[int],
-        mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
+        mx.distributed.all_gather(mx.array([n_tasks]), group=group, stream=mx.cpu).tolist(),
     )
     max_tasks = max(all_counts)
     world_size: int = 1 if group is None else group.size()
@@ -921,7 +930,7 @@ def mx_all_gather_tasks(
 
     gathered = cast(
         list[list[list[int]]],
-        mx.distributed.all_gather(mx.array(padded), group=group)
+        mx.distributed.all_gather(mx.array(padded), group=group, stream=mx.cpu)
         .reshape(world_size, max_tasks, -1)
         .tolist(),
     )

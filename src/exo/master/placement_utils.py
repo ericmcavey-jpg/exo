@@ -366,14 +366,14 @@ def find_ip_prioritised(
             "unknown": 4,
         }
 
-    # RDMA prefers ethernet coordinator
+    # JACCL/RDMA coordinator traffic should stay on the fastest direct fabric.
     else:
         priority = {
-            "ethernet": 0,
-            "wifi": 1,
-            "unknown": 2,
-            "maybe_ethernet": 3,
-            "thunderbolt": 4,
+            "thunderbolt": 0,
+            "maybe_ethernet": 1,
+            "ethernet": 2,
+            "wifi": 3,
+            "unknown": 4,
         }
     return min(ips, key=lambda ip: priority.get(ip_to_type.get(ip, "unknown"), 2))
 

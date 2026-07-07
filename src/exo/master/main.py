@@ -462,6 +462,11 @@ class Master:
                                 await self._send_indexed_event(
                                     IndexedEvent(idx=i, event=event)
                                 )
+                                # Yield periodically so this catch-up burst
+                                # doesn't monopolize the command processor
+                                # and starve other commands / liveness checks.
+                                if (i - command.since_idx) % 25 == 0:
+                                    await anyio.sleep(0)
                     for event in generated_events:
                         await self.event_sender.send(event)
                 except Exception as e:

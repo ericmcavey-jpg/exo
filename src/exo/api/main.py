@@ -769,12 +769,34 @@ class API:
             ]()
 
             with recv as token_chunks:
-                async for chunk in token_chunks:
-                    yield chunk
-                    if isinstance(chunk, PrefillProgressChunk):
-                        continue
-                    if chunk.finish_reason is not None:
-                        break
+                try:
+                    async for chunk in token_chunks:
+                        yield chunk
+                        if isinstance(chunk, PrefillProgressChunk):
+                            continue
+                        if chunk.finish_reason is not None:
+                            break
+                except anyio.get_cancelled_exc_class():
+                    raise
+                except Exception as exception:
+                    # A dropped/malformed chunk (e.g. a network-level event
+                    # validation failure — see router.py's publish_bytes fix,
+                    # 2026-07-05) used to kill this generator silently here,
+                    # which downstream (collect_chat_response) meant the
+                    # client got a 200 OK with a completely empty body —
+                    # confirmed client-side as
+                    # `json.JSONDecodeError: Expecting value: line 1 column 1
+                    # (char 0)`, indistinguishable from a network fluke.
+                    # Yield a real ErrorChunk instead so callers get an
+                    # actual, parseable error instead of nothing.
+                    logger.opt(exception=exception).error(
+                        f"Chunk stream for command {command_id} died mid-stream — "
+                        f"surfacing as ErrorChunk instead of truncating the response"
+                    )
+                    yield ErrorChunk(
+                        model=ModelId("unknown"),
+                        error_message=f"Internal error while streaming response: {exception}",
+                    )
 
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
@@ -1967,11 +1989,19 @@ class API:
                 logger.opt(exception=e).debug("")
 
     async def _apply_state(self):
+        applied_count = 0
         with self.event_receiver as events:
             async for i_event in events:
                 self._event_log.append(i_event.event)
                 self.state = apply(self.state, i_event)
                 event = i_event.event
+
+                # Yield periodically during a large backlog replay so
+                # sibling tasks (e.g. heartbeat emission) aren't starved
+                # long enough to trip the master's liveness timeout.
+                applied_count += 1
+                if applied_count % 25 == 0:
+                    await anyio.sleep(0)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(

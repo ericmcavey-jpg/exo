@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{env, str::FromStr, sync::Arc};
 
 use tokio::task::JoinHandle;
 use zenoh::{Result, Session as ZSession, config::Locator};
@@ -32,6 +32,21 @@ pub fn cfg(identity: &str, listen_port: u16) -> Result<zenoh::Config> {
     cfg.insert_json5("scouting/multicast/enabled", "false")?;
     cfg.insert_json5("scouting/multicast/autoconnect", "[]")?;
     cfg.insert_json5("scouting/gossip/multihop", "true")?;
+    if let Ok(endpoints) = env::var("EXO_CONNECT_ENDPOINTS") {
+        let endpoints = endpoints
+            .split(",")
+            .map(str::trim)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(|endpoint| format!("\"{endpoint}\""))
+            .collect::<Vec<_>>();
+        if !endpoints.is_empty() {
+            log::warn!(
+                "EXO_CONNECT_ENDPOINTS forcing Zenoh connect/endpoints={}",
+                format!("[{}]", endpoints.join(","))
+            );
+            cfg.insert_json5("connect/endpoints", &format!("[{}]", endpoints.join(",")))?;
+        }
+    }
     cfg.insert_json5("adminspace/enabled", "true")?;
     //cfg.insert_json5("transport/link/tx/batch_size", "9216")?;
     cfg.insert_json5("transport/link/rx/buffer_size", "16777216")?;
@@ -71,6 +86,37 @@ pub async fn open(
         .await?;
     let z = zenoh::session::init(runtime.clone().into()).await?;
     runtime.start().await?;
+    if let Ok(peers) = env::var("EXO_CONNECT_PEERS") {
+        for peer in peers
+            .split(",")
+            .map(str::trim)
+            .filter(|peer| !peer.is_empty())
+        {
+            let Some((zid, addr)) = peer.split_once("@") else {
+                log::warn!("ignoring EXO_CONNECT_PEERS entry without @: {peer}");
+                continue;
+            };
+            let Ok(zid) = ZenohId::from_str(zid.trim()).inspect_err(|e| {
+                log::warn!("failed to parse EXO_CONNECT_PEERS zid {zid}: {e}");
+            }) else {
+                continue;
+            };
+            let addr = addr.trim();
+            let locator_result = if addr.contains("/") {
+                Locator::from_str(addr)
+            } else {
+                Locator::new("tcp", addr.to_string(), "")
+            };
+            let Ok(locator) = locator_result.inspect_err(|e| {
+                log::warn!("failed to parse EXO_CONNECT_PEERS locator {addr}: {e}");
+            }) else {
+                continue;
+            };
+            log::warn!("EXO_CONNECT_PEERS connecting to {zid} at {locator}");
+            let connected = runtime.connect_peer(&zid.into(), &[locator]).await;
+            log::warn!("EXO_CONNECT_PEERS connect_peer({zid}) -> {connected}");
+        }
+    }
     let mut discovery =
         Discovery::new(z.zid(), namespace, listen_port, discovery_service_port).await?;
     let _jh = Arc::new(AbortOnDrop(tokio::task::spawn(async move {

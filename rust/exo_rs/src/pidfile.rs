@@ -2,14 +2,12 @@ use pidfile_rs::{Pidfile, PidfileError};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::{PyModule, PyModuleMethods};
 use pyo3::{Bound, PyErr, PyResult, Python, pyclass, pymethods};
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use std::fs;
 use std::fs::Permissions;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::prelude::PermissionsExt;
 use std::path::PathBuf;
 
-#[gen_stub_pyclass]
 #[pyclass(frozen, extends=PyException, name="PidfileError")]
 pub struct PyPidfileError(PidfileError);
 
@@ -23,7 +21,6 @@ impl PyPidfileError {
     }
 }
 
-#[gen_stub_pymethods]
 #[pymethods]
 impl PyPidfileError {
     fn __repr__(&self) -> String {
@@ -53,7 +50,6 @@ impl PyPidfileError {
 /// [`exit`]: https://doc.rust-lang.org/std/process/fn.exit.html
 /// [`pidfile`]: https://linux.die.net/man/3/pidfile
 /// [`daemon`(3)]: https://linux.die.net/man/3/daemon
-#[gen_stub_pyclass]
 #[pyclass(name = "Pidfile")]
 pub struct PyPidfile(Option<Pidfile>);
 
@@ -73,7 +69,6 @@ impl PyPidfile {
     }
 }
 
-#[gen_stub_pymethods]
 #[pymethods]
 impl PyPidfile {
     /// Creates a new PID file and locks it.

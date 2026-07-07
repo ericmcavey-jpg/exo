@@ -74,7 +74,11 @@ _pending_prefill_sends: list[tuple[mx.array, int, mx.distributed.Group]] = []
 
 def flush_prefill_sends() -> None:
     for output, dst, group in _pending_prefill_sends:
-        sent = mx.distributed.send(output, dst, group=group)
+        # stream=mx.cpu avoids scheduling on the GPU stream, which has an
+        # unconfigurable ~5s Metal command-buffer timeout. Confirmed needed
+        # on M4 Max specifically (GPU Timeout Error / SIGABRT otherwise);
+        # harmless on other Apple Silicon generations.
+        sent = mx.distributed.send(output, dst, group=group, stream=mx.cpu)
         mx.async_eval(sent)
     _pending_prefill_sends.clear()
 
@@ -133,8 +137,12 @@ class PipelineFirstLayer(CustomMlxLayer):
         if self.r != 0:
             # We want to avoid GPU timeout errors by evalling the distributed operation
             # so that it stays on CPU, which does not have a timeout.
+            # stream=mx.cpu additionally forces the op itself off the GPU
+            # stream -- confirmed necessary on M4 Max (mx.eval() wrapping
+            # alone was not sufficient there; GPU Timeout Error / SIGABRT
+            # observed during warmup without it).
             mx.eval(x)
-            x = mx.distributed.recv_like(x, (self.r - 1), group=self.group)
+            x = mx.distributed.recv_like(x, (self.r - 1), group=self.group, stream=mx.cpu)
             mx.eval(x)
         return self.original_layer(x, *args, **kwargs)
 
@@ -173,7 +181,7 @@ class PipelineLastLayer(CustomMlxLayer):
                 )
             else:
                 output = mx.distributed.send(
-                    output, (self.r + 1) % self.s, group=self.group
+                    output, (self.r + 1) % self.s, group=self.group, stream=mx.cpu
                 )
             if cache is not None:
                 # CacheList (used by MLA models like DeepSeekV32, GLM MoE DSA)
@@ -186,7 +194,7 @@ class PipelineLastLayer(CustomMlxLayer):
                 mx.eval(_cache.keys)  # type: ignore
 
         if not self.is_prefill:
-            output = mx.distributed.all_gather(output, group=self.group)[
+            output = mx.distributed.all_gather(output, group=self.group, stream=mx.cpu)[
                 -output.shape[0] :
             ]
             mx.eval(output)
@@ -296,7 +304,14 @@ def pipeline_auto_parallel(
     layers = layers[start_layer:end_layer]
     total = len(layers)
     for i, layer in enumerate(layers):
-        mx.eval(layer)  # type: ignore
+        # Materializing a single layer's weights (dequantization etc.) can
+        # exceed Metal's hard ~5s command-buffer timeout for architectures
+        # with unusually large per-layer tensors (e.g. DeepSeek-V4's MoE
+        # experts), causing a GPU Timeout Error / SIGABRT during load.
+        # Forcing this onto the CPU stream avoids that ceiling entirely;
+        # it only affects one-time model loading, not decode-time perf.
+        with mx.stream(mx.cpu):
+            mx.eval(layer)  # type: ignore
         mx.clear_cache()
         yield ModelLoadingResponse(layers_loaded=i, total=total)
 
@@ -763,7 +778,7 @@ class ShardedMoE(CustomMlxLayer):
             x = sum_gradients(self.sharding_group)(x)
         y = self.original_layer.__call__(x)
         if self.sharding_group is not None:
-            y = mx.distributed.all_sum(y, group=self.sharding_group)
+            y = mx.distributed.all_sum(y, group=self.sharding_group, stream=mx.cpu)
         return y
 
 
@@ -780,7 +795,7 @@ class ShardedMoEV4(CustomMlxLayer):
             x = sum_gradients(self.sharding_group)(x)
         y = self._v4_inner(x, input_ids)
         if self.sharding_group is not None:
-            y = mx.distributed.all_sum(y, group=self.sharding_group)
+            y = mx.distributed.all_sum(y, group=self.sharding_group, stream=mx.cpu)
         return y
 
 
@@ -820,7 +835,7 @@ class _AllSumLinear(nn.Module):
         self._group = group
 
     def __call__(self, x: mx.array) -> mx.array:
-        x = mx.distributed.all_sum(x, group=self._group)
+        x = mx.distributed.all_sum(x, group=self._group, stream=mx.cpu)
         return cast(Callable[[mx.array], mx.array], self.inner)(x)
 
 
@@ -1029,7 +1044,7 @@ class WrappedMiniMaxAttention(CustomMlxLayer):
                 [queries, keys], axis=-1
             )  # (batch_dim, seq_dim, q_dim + k_dim)
             qk = mx.distributed.all_gather(
-                qk, group=self.group
+                qk, group=self.group, stream=mx.cpu
             )  # (n*batch_dim, seq_dim, q_dim + k_dim)
 
             qk = qk.reshape(n, batch_dim, seq_dim, q_dim + k_dim).transpose(1, 2, 0, 3)
@@ -1550,7 +1565,7 @@ class WrappedGemma4Experts(CustomMlxLayer):
             x = sum_gradients(self.sharding_group)(x)
         y: mx.array = self.original_layer(x, top_k_indices, top_k_weights)
         if self.sharding_group is not None:
-            y = mx.distributed.all_sum(y, group=self.sharding_group)
+            y = mx.distributed.all_sum(y, group=self.sharding_group, stream=mx.cpu)
         return y
 
 

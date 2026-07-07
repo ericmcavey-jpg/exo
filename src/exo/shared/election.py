@@ -195,7 +195,10 @@ class Election:
             self._campaign_cancel_scope.cancel()
         if self._campaign_done:
             logger.info("Waiting for other campaign to finish")
-            await self._campaign_done.wait()
+            # Local fix: the cancelled campaign may never set its done event,
+            # deadlocking every future election on this node. Bound the wait.
+            with anyio.move_on_after(10):
+                await self._campaign_done.wait()
 
         done = Event()
         self._campaign_done = done

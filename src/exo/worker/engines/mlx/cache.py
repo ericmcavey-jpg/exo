@@ -13,12 +13,18 @@ from mlx_lm.models.cache import (
     QuantizedKVCache,
     RotatingKVCache,
 )
-from mlx_lm.models.deepseek_v4 import (
-    DeepseekV4Cache,
-)
-from mlx_lm.models.deepseek_v4 import (
-    _CompressorBranch as CompressorBranch,  # type: ignore
-)
+try:
+    from mlx_lm.models.deepseek_v4 import (
+        DeepseekV4Cache,
+    )
+    try:
+        from mlx_lm.models.deepseek_v4 import _CompressorBranch as CompressorBranch
+    except ImportError:
+        CompressorBranch = object  # Fallback
+except ImportError:
+    DeepseekV4Cache = None  # type: ignore
+    CompressorBranch = object  # type: ignore
+
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.memory import Memory
@@ -464,6 +470,7 @@ class KVPrefixCache:
         all_pressure = mx.distributed.all_gather(
             mx.array([local_pressure], dtype=mx.float32),
             group=self._group,
+            stream=mx.cpu,
         )
         # .item() evals.
         max_pressure = float(mx.max(all_pressure).item())

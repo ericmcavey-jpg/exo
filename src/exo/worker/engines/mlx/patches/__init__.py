@@ -1,3 +1,6 @@
+from exo.worker.engines.mlx.patches.eval_every_n_layers import (
+    apply_eval_every_n_layers_patch,
+)
 from exo.worker.engines.mlx.patches.opt_batch_gen import apply_batch_gen_patch
 from exo.worker.engines.mlx.patches.standard_yarn_rope import patch_yarn_rope
 
@@ -11,3 +14,4 @@ def apply_mlx_patches() -> None:
     _applied = True
     patch_yarn_rope()
     apply_batch_gen_patch()
+    apply_eval_every_n_layers_patch()

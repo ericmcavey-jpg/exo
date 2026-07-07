@@ -166,16 +166,22 @@ class EventRouter:
             delay = min(self._nack_cap_seconds, delay)
             self._nack_attempts += 1
             try:
-                await anyio.sleep(delay)
-                logger.info(
-                    f"Nack attempt {self._nack_attempts}: Requesting Event Log from {since_idx}"
-                )
-                await self.command_sender.send(
-                    ForwarderCommand(
-                        origin=self._system_id,
-                        command=RequestEventLog(since_idx=since_idx),
+                # Local fix: retry until the cancel scope is cancelled by an
+                # in-sequence event. A single-shot request deadlocks the node
+                # if the master reply is lost and no further traffic arrives.
+                while True:
+                    await anyio.sleep(delay)
+                    logger.info(
+                        f"Nack attempt {self._nack_attempts}: Requesting Event Log from {since_idx}"
                     )
-                )
+                    await self.command_sender.send(
+                        ForwarderCommand(
+                            origin=self._system_id,
+                            command=RequestEventLog(since_idx=since_idx),
+                        )
+                    )
+                    self._nack_attempts += 1
+                    delay = min(self._nack_cap_seconds, self._nack_base_seconds * (2.0 ** self._nack_attempts))
             finally:
                 if self._nack_cancel_scope is scope:
                     self._nack_cancel_scope = None

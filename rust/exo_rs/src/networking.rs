@@ -10,10 +10,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::{Bound, Py, PyAny, PyErr, PyResult, Python, pymethods};
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyclass_complex_enum, gen_stub_pymethods};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-#[gen_stub_pyclass]
 #[pyclass(name = "NetworkingHandle")]
 pub struct PyNetworkingHandle {
     // channels
@@ -21,7 +19,6 @@ pub struct PyNetworkingHandle {
     pub swarm: Arc<Mutex<Pin<Box<dyn Stream<Item = FromSwarm> + Send>>>>,
 }
 
-#[gen_stub_pyclass_complex_enum]
 #[pyclass(name = "FromSwarm")]
 pub enum PyFromSwarm {
     Connection { connected: bool },
@@ -54,7 +51,6 @@ impl PyNetworkingHandle {
     }
 }
 
-#[gen_stub_pymethods]
 #[pymethods]
 impl PyNetworkingHandle {
     // NOTE: `async fn`s here that use `.await` will wrap the future in `.allow_threads_py()`
@@ -101,9 +97,6 @@ impl PyNetworkingHandle {
         })
     }
 
-    #[gen_stub(override_return_type(
-        type_repr="typing.Awaitable[FromSwarm]", imports=("typing")
-    ))]
     pub fn recv<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let swarm = Arc::clone(&self.swarm);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

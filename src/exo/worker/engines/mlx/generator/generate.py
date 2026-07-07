@@ -411,7 +411,7 @@ def warmup_inference(
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
         input=[InputMessage(role="user", content=content)],
-        max_output_tokens=50,
+        max_output_tokens=4,
         temperature=0.0,
     )
 
@@ -451,6 +451,7 @@ def warmup_inference(
                 mx.distributed.all_gather(
                     mx.array([check_for_cancel_every]),
                     group=group,
+                    stream=mx.cpu,
                 )
             ).item()
         )

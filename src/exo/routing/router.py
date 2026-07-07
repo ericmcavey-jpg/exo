@@ -84,7 +84,28 @@ class TopicRouter[T: FrozenModel]:
         self.senders -= to_clear
 
     async def publish_bytes(self, data: bytes):
-        await self.publish(self.topic.deserialize(data))
+        try:
+            item = self.topic.deserialize(data)
+        except Exception as exception:
+            # A single malformed/incompatible event must never take down the
+            # whole gossipsub receive loop (and thus this node's entire
+            # network connectivity) — event sourcing already tolerates a
+            # missed event via the existing Nack/resync mechanism, so drop
+            # this one message and keep going. Root-caused 2026-07-05: an
+            # uncaught ValidationError here (e.g. a ChunkGenerated event with
+            # an unexpected extra field) propagated out of _networking_recv's
+            # bare `except ... raise`, crashing the node's receive loop
+            # entirely. Log the full undertruncated payload (pydantic's own
+            # error message truncates long values) so a recurrence can
+            # actually be root-caused instead of guessed at from a "..." in
+            # the middle of the error text.
+            logger.opt(exception=exception).error(
+                f"Dropping malformed message on topic {self.topic.topic} "
+                f"({len(data)} bytes) — failed to deserialize as "
+                f"{self.topic.model_type.__name__}. Raw payload: {data!r}"
+            )
+            return
+        await self.publish(item)
 
     def new_sender(self) -> Sender[T]:
         return self._sender.clone()

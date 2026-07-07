@@ -932,7 +932,24 @@ async def download_shard(
     # Pick a writable directory with enough free space.
     total_size = sum(f.size or 0 for f in filtered_file_list)
     if skip_download:
-        existing = resolve_existing_model(model_id)
+        # resolve_existing_model does synchronous filesystem scans (os.walk,
+        # stat, read_text) that may live on a network mount. This is called
+        # directly on the event loop - with no thread offload at all - for
+        # every registered model as part of the periodic download-status
+        # scan (impl_shard_downloader.get_shard_download_status), so a
+        # single wedged mount freezes the whole node's event loop
+        # indefinitely, not just one task. Bound it the same way as the
+        # other call sites for this function.
+        try:
+            existing = await asyncio.wait_for(
+                asyncio.to_thread(resolve_existing_model, model_id), timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"resolve_existing_model for {model_id} exceeded 5s "
+                "(stuck filesystem?); treating as not found for this check"
+            )
+            existing = None
         target_dir = (
             existing
             if existing is not None

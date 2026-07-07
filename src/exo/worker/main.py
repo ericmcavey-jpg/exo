@@ -138,11 +138,20 @@ class Worker:
                 )
 
     async def _event_applier(self):
+        applied_count = 0
         with self.event_receiver as events:
             async for event in events:
                 # 2. for each event, apply it to the state
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # Yield periodically during a large backlog replay (e.g. a
+                # rejoining node catching up) so sibling tasks like
+                # heartbeat emission still get scheduled and don't get
+                # mistaken for a dead node by the master's liveness check.
+                applied_count += 1
+                if applied_count % 25 == 0:
+                    await anyio.sleep(0)
 
                 if isinstance(event, InstanceDeleted):
                     self._instance_backoff.reset(event.instance_id)
@@ -240,9 +249,31 @@ class Worker:
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
 
-                    found_path = await to_thread.run_sync(
-                        resolve_existing_model, model_id, shard.model_card
-                    )
+                    # resolve_existing_model does synchronous filesystem
+                    # scans (os.walk, stat, read_text) that may live on a
+                    # network mount. This runs on an anyio worker thread, so
+                    # a wedged mount can't freeze the event loop directly,
+                    # but an unbounded wait here still freezes this whole
+                    # plan_step loop forever (it's a single sequential
+                    # while-loop), which means no task - including
+                    # ConnectToGroup for ring formation - ever dispatches
+                    # again. Bound it; a timeout is treated as "not found
+                    # yet" and naturally retried on the next backoff-gated
+                    # attempt rather than hanging the node.
+                    found_path = None
+                    with anyio.move_on_after(5.0) as scope:
+                        found_path = await to_thread.run_sync(
+                            resolve_existing_model,
+                            model_id,
+                            shard.model_card,
+                            abandon_on_cancel=True,
+                        )
+                    if scope.cancelled_caught:
+                        logger.warning(
+                            f"resolve_existing_model for {model_id} exceeded 5s "
+                            "(stuck filesystem?); will retry on next backoff attempt"
+                        )
+                        continue
                     if found_path is not None:
                         logger.info(f"Model {model_id} found at {found_path}")
                         await self.event_sender.send(

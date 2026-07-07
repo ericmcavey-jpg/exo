@@ -1,4 +1,5 @@
 import json
+import threading
 from enum import Enum
 from typing import Annotated, Any
 
@@ -95,8 +96,66 @@ class _CardCache:
 card_cache = _CardCache()
 
 
+_vision_config_cache: dict[str, "VisionCardConfig | None"] = {}
+_VISION_DETECT_TIMEOUT_SECONDS = 2.0
+
+
+class _TimedOut:
+    pass
+
+
+_TIMED_OUT = _TimedOut()
+
+
 def detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
     normalized = model_id.normalize()
+    # This runs inside pydantic validation ON the event loop (triggered by
+    # deserializing any incoming message that embeds a ModelCard) and opens
+    # files that may live on a network mount. A single stuck open() here
+    # freezes the entire node's event loop indefinitely - no heartbeats, no
+    # event replay, nothing - which looks like a dead node to the rest of
+    # the cluster and gets it evicted. Bound the blocking I/O with a hard
+    # wall-clock timeout via a daemon thread so a wedged mount can never
+    # take the whole node down with it; only the fast, common case (cache
+    # hit, or a healthy local/mounted read) stays on the hot path.
+    if normalized in _vision_config_cache:
+        return _vision_config_cache[normalized]
+    result = _detect_vision_with_timeout(normalized)
+    if isinstance(result, _TimedOut):
+        # Cache the timeout itself (as "no vision"), not just successful
+        # results: the underlying blocking thread is abandoned, not killed,
+        # so leaving this uncached means every future validation of the
+        # same model_id spawns another thread stuck on the same wedged
+        # mount forever - an unbounded thread leak. One abandoned thread
+        # per model_id is an acceptable, bounded cost; one per validation
+        # is not.
+        logger.warning(
+            f"Vision config detection for {normalized} exceeded "
+            f"{_VISION_DETECT_TIMEOUT_SECONDS}s (stuck filesystem?); "
+            "caching as no vision support so this doesn't retry indefinitely"
+        )
+        result = None
+    _vision_config_cache[normalized] = result
+    return result
+
+
+def _detect_vision_with_timeout(
+    normalized: str,
+) -> "VisionCardConfig | None | _TimedOut":
+    result_box: list["VisionCardConfig | None"] = []
+
+    def worker():
+        result_box.append(_detect_vision_uncached(normalized))
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(_VISION_DETECT_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        return _TIMED_OUT
+    return result_box[0] if result_box else None
+
+
+def _detect_vision_uncached(normalized: str) -> "VisionCardConfig | None":
     for model_dir in [d / normalized for d in EXO_MODELS_DIRS]:
         config_path = model_dir / "config.json"
         if not config_path.exists():
@@ -105,7 +164,7 @@ def detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
             with open(config_path) as f:
                 raw = json.load(f)  # type: ignore
             return ConfigData.model_validate(
-                raw, context={"model_id": str(model_id)}
+                raw, context={"model_id": str(normalized)}
             ).vision
         except Exception:
             continue
