@@ -43,6 +43,8 @@ from pydantic import RootModel
 
 from exo.download.download_utils import build_model_path
 from exo.shared.types.common import Host
+import psutil
+
 from exo.shared.types.memory import Memory
 from exo.shared.types.tasks import TaskId, TextGeneration
 from exo.shared.types.text_generation import ChatTemplateValue, TextGenerationTaskParams
@@ -813,18 +815,41 @@ def set_wired_limit_for_model(model_size: Memory):
     if not mx.metal.is_available():
         return
 
-    max_rec_size = Memory.from_bytes(
+    # Apple's max_recommended_working_set_size looked like a conservative
+    # per-chip constant that left real available RAM on the table -- but
+    # mx.set_wired_limit() *hard-enforces* it as an upper bound: requesting
+    # more than this value raises "Setting a wired limit larger than the
+    # maximum working set size is not allowed" (confirmed 2026-07-08, crashed
+    # the runner in ~10s during a real placement attempt). So this is not a
+    # policy choice we can override -- clamp to it. What we CAN still fix:
+    # on nodes whose live available RAM is below this device constant
+    # (because something else is using memory right now), target that
+    # smaller, more accurate number instead of blindly assuming the full
+    # device constant is free. EXO_WIRED_LIMIT_FRACTION lets the fraction of
+    # live-available be tuned/rolled back without a code change.
+    device_rec_size = Memory.from_bytes(
         int(mx.device_info()["max_recommended_working_set_size"])
     )
-    if model_size > 0.9 * max_rec_size:
+    live_available = Memory.from_bytes(int(psutil.virtual_memory().available))
+    fraction = float(os.environ.get("EXO_WIRED_LIMIT_FRACTION", "0.97"))
+    wired_limit = Memory.from_bytes(
+        min(int(live_available.in_bytes * fraction), device_rec_size.in_bytes)
+    )
+
+    if model_size > 0.9 * wired_limit:
         logger.warning(
             f"Generating with a model that requires {model_size.in_float_mb:.1f} MB "
-            f"which is close to the maximum recommended size of {max_rec_size.in_float_mb:.1f} "
-            "MB. This can be slow. See the documentation for possible work-arounds: "
+            f"which is close to the wired limit of {wired_limit.in_float_mb:.1f} MB "
+            f"({fraction:.0%} of {live_available.in_float_mb:.1f} MB currently available). "
+            "This can be slow. See the documentation for possible work-arounds: "
             "https://github.com/ml-explore/mlx-lm/tree/main#large-models"
         )
-    mx.set_wired_limit(max_rec_size.in_bytes)
-    logger.info(f"Wired limit set to {max_rec_size}.")
+    mx.set_wired_limit(wired_limit.in_bytes)
+    logger.info(
+        f"Wired limit set to {wired_limit} "
+        f"({fraction:.0%} of {live_available} live available; "
+        f"device recommendation was {device_rec_size})."
+    )
 
 
 def mlx_cleanup(

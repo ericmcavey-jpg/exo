@@ -1,3 +1,4 @@
+import os
 from collections.abc import Generator, Mapping
 
 from loguru import logger
@@ -17,6 +18,56 @@ from exo.shared.types.worker.shards import (
     TensorShardMetadata,
 )
 
+# Placement previously validated against each node's raw ram_available, but
+# the worker separately caps actual Metal usage via mx.set_wired_limit() to
+# a fraction of live available RAM (see set_wired_limit_for_model() in
+# utils_mlx.py) -- these two numbers must agree, or placement can approve an
+# allocation the runtime will then refuse (this happened in production,
+# 2026-07-08 DeepSeek-V3.2-4bit bakeoff: a node with 88GB "available" was
+# approved for 75GB of layers, but the worker's own separately-configured
+# ceiling only allowed ~78GB total, leaving far less real margin than
+# placement assumed). Keep this fraction identical to
+# EXO_WIRED_LIMIT_FRACTION's default so both layers agree by default.
+_WIRED_LIMIT_FRACTION = float(os.environ.get("EXO_WIRED_LIMIT_FRACTION", "0.97"))
+
+# mx.set_wired_limit() *hard-enforces* mx.device_info()'s
+# max_recommended_working_set_size as an upper bound (confirmed 2026-07-08 --
+# requesting more raises "Setting a wired limit larger than the maximum
+# working set size is not allowed" and crashes the runner). Apple's own
+# per-chip default for that value proved too conservative in practice
+# (DeepSeek-V3.2-4bit bakeoff, 2026-07-08), so each node's
+# iogpu.wired_limit_mb sysctl is now deliberately overridden higher (see
+# fleet runbook) -- this raises what mx.device_info() reports in turn. The
+# master has no direct mx.device_info() access (it aggregates
+# worker-reported MemoryUsage, not GPU device metadata), so this is a
+# hardcoded lookup for the two chips in this fleet, keyed by total RAM.
+# THESE VALUES MUST BE KEPT IN SYNC with whatever iogpu.wired_limit_mb is
+# actually set to on each node -- if you change one, change the other.
+# Current values (97% of live available RAM at time of setting, conservative
+# node in each tier, 2026-07-08):
+#   M3 Ultra, 96GB total   -> 82.47 GiB
+#   M3/M4 Max, 128GB total -> 115.59 GiB
+_DEVICE_RECOMMENDED_MAX_GIB_BY_TOTAL_GB = [
+    (100, 115.59),  # >=100GB total (128GB M3/M4 Max nodes)
+    (0, 82.47),  # <100GB total (96GB M3 Ultra nodes)
+]
+
+
+def _device_recommended_max(ram_total: Memory) -> Memory:
+    for threshold_gb, max_gib in _DEVICE_RECOMMENDED_MAX_GIB_BY_TOTAL_GB:
+        if ram_total.in_gb >= threshold_gb:
+            return Memory.from_bytes(int(max_gib * 1024**3))
+    return Memory.from_bytes(int(_DEVICE_RECOMMENDED_MAX_GIB_BY_TOTAL_GB[-1][1] * 1024**3))
+
+
+def _effective_available(mem_usage: MemoryUsage) -> Memory:
+    """This node's ram_available, scaled down to match what the worker will
+    actually enforce at runtime via mx.set_wired_limit() -- the smaller of
+    (a fraction of live available RAM) and (this chip's hard MLX ceiling)."""
+    fraction_based = int(mem_usage.ram_available.in_bytes * _WIRED_LIMIT_FRACTION)
+    device_cap = _device_recommended_max(mem_usage.ram_total).in_bytes
+    return Memory.from_bytes(min(fraction_based, device_cap))
+
 
 def filter_cycles_by_memory(
     cycles: list[Cycle],
@@ -29,7 +80,10 @@ def filter_cycles_by_memory(
             continue
 
         total_mem = sum(
-            (node_memory[node_id].ram_available for node_id in cycle.node_ids),
+            (
+                _effective_available(node_memory[node_id])
+                for node_id in cycle.node_ids
+            ),
             start=Memory(),
         )
         if total_mem >= required_memory:
@@ -85,7 +139,10 @@ def _compute_total_memory(
     node_memory: Mapping[NodeId, MemoryUsage],
 ) -> Memory:
     total_memory = sum(
-        (node_memory[node_id].ram_available for node_id in node_ids),
+        (
+            _effective_available(node_memory[node_id])
+            for node_id in node_ids
+        ),
         start=Memory(),
     )
     if total_memory.in_bytes == 0:
@@ -102,7 +159,8 @@ def _allocate_and_validate_layers(
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
-            node_memory[node_id].ram_available / total_memory for node_id in node_ids
+            _effective_available(node_memory[node_id]) / total_memory
+            for node_id in node_ids
         ],
     )
 
@@ -111,12 +169,13 @@ def _allocate_and_validate_layers(
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        available_memory = node_memory[node_id].ram_available
+        available_memory = _effective_available(node_memory[node_id])
         if required_memory > available_memory:
             raise ValueError(
                 f"Node {i} ({node_id}) has insufficient memory: "
                 f"requires {required_memory.in_gb:.2f} GB for {node_layers} layers, "
-                f"but only has {available_memory.in_gb:.2f} GB available"
+                f"but only has {available_memory.in_gb:.2f} GB available "
+                f"(effective, {_WIRED_LIMIT_FRACTION:.0%} of live available)"
             )
 
     return layer_allocations
