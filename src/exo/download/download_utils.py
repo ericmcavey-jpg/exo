@@ -942,7 +942,7 @@ async def download_shard(
         # other call sites for this function.
         try:
             existing = await asyncio.wait_for(
-                asyncio.to_thread(resolve_existing_model, model_id), timeout=5.0
+                asyncio.to_thread(resolve_existing_model, model_id), timeout=60.0
             )
         except asyncio.TimeoutError:
             logger.warning(

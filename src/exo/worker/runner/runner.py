@@ -384,6 +384,16 @@ class Runner:
                         f"Received {item.__class__.__name__} outside of state machine in {self.current_status=}"
                     )
 
+        # Release MLX's GPU buffer pool from the just-finished generation(s) so
+        # the next request's prefill starts with maximum free memory. Without
+        # this, pooled buffers accumulate across requests on a loaded instance
+        # and a memory-tight node OOMs on the 2nd/3rd task of a multi-task run
+        # ([METAL] command-buffer Insufficient Memory -> SIGABRT). clear_cache
+        # only frees UNUSED pooled buffers; model weights and any live KV cache
+        # are untouched. (2026-07-09)
+        import mlx.core as mx
+
+        mx.clear_cache()
         self.update_status(RunnerReady(prefill_server_port=self._prefill_server_port))
         logger.info("runner ready")
 

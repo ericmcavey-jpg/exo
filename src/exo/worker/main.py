@@ -262,7 +262,7 @@ class Worker:
                     # yet" and naturally retried on the next backoff-gated
                     # attempt rather than hanging the node.
                     found_path = None
-                    with anyio.move_on_after(5.0) as scope:
+                    with anyio.move_on_after(60.0) as scope:
                         found_path = await to_thread.run_sync(
                             resolve_existing_model,
                             model_id,
