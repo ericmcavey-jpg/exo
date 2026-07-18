@@ -105,7 +105,11 @@ def apply_all_parsers(
                 starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
             )
 
-        if tool_parser:
+        # 2026-07-18: only parse tool calls when the caller ASKED for tools. exo
+        # installs a parser from the tokenizer at build time (builder.py:68-81), so
+        # without this guard an unparseable tag (e.g. LongCat's <longcat_tool_call>)
+        # sets finish_reason=error and discards the whole response.
+        if tool_parser and tools:
             generator = parse_tool_calls(generator, tool_parser, tools)
 
     generator = count_reasoning_tokens(generator)
