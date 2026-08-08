@@ -1,4 +1,5 @@
 import contextlib
+import os
 import functools
 import math
 import time
@@ -23,6 +24,14 @@ from exo.api.types import (
 )
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
+
+# Flush the MLX buffer cache every N prefill chunks (see PREFILL_CLEARCACHE below).
+# Default 2 keeps the long-standing CADENCE (the old test was `i % 2 == 1`, so this
+# fires one chunk earlier — same frequency, different phase); 1 flushes every chunk.
+# max(1, ...) so a 0 or negative value cannot turn the flush into a divide-by-zero.
+_PREFILL_CLEARCACHE_EVERY = max(
+    1, int(os.environ.get("EXO_PREFILL_CLEARCACHE_EVERY", "2"))
+)
 from exo.shared.types.text_generation import (
     InputMessage,
     InputMessageContent,
@@ -161,6 +170,80 @@ def _has_pipeline_communication_layer(model: Model):
     return False
 
 
+def single_node_prefill(
+    model: Model,
+    prompt: mx.array,
+    prompt_cache: KVCacheType,
+    prefill_step_size: int,
+    kv_group_size: int | None,
+    kv_bits: int | None,
+    prompt_progress_callback: Callable[[int, int], None],
+) -> None:
+    """Chunked prefill for a SINGLE-NODE (non-pipeline) placement.
+
+    mlx_lm's stream_generate chunks the prompt at prefill_step_size but never
+    applies exo's MoE-aware periodic mx.clear_cache() — that flush lives only
+    in pipeline_parallel_prefill, which is skipped when the model carries no
+    Pipeline{First,Last}Layer. On a big MoE that omission is fatal: the
+    attention buffers grow in SHAPE every chunk, so the allocator can never
+    reuse them and the pool climbs monotonically. The growing-shape garbage
+    over a full prefill sums to roughly 32 * L^2 * 2 bytes (~92 GB at
+    L=38K) versus a few GB when each chunk is flushed.
+
+    Measured 2026-08-07 (Qwen3.5-397B-A17B-4bit, 512 experts, single node,
+    256GB box, 38K-token prompt): unflushed, RAM passed 242 GiB and was still
+    climbing with zero tokens emitted; the same prompt is bounded by ~3 GB of
+    transient at prefill_step_size=32 with a flush every chunk.
+
+    Mirrors pipeline_parallel_prefill's loop and side effects (including the
+    trailing two single-token passes that match stream_generate's cache
+    shape) without any distributed machinery.
+    """
+    quantize_cache_fn: Callable[..., None] = functools.partial(
+        maybe_quantize_kv_cache,
+        quantized_kv_start=0,
+        kv_group_size=kv_group_size,
+        kv_bits=kv_bits,
+    )
+    total = len(prompt)
+    processed = 0
+    remaining = total - 1          # final token handled by the post-loop
+    chunk_index = 0
+
+    prompt_progress_callback(0, total)
+    with mx.stream(generation_stream):
+        while remaining > 0:
+            chunk_size = min(prefill_step_size, remaining)
+            model(
+                prompt[processed : processed + chunk_size][None],
+                cache=prompt_cache,
+            )
+            quantize_cache_fn(prompt_cache)
+            # Force materialization so the chunk's intermediates become
+            # collectable instead of accumulating in one giant lazy graph.
+            mx.eval([c.state for c in prompt_cache])  # type: ignore
+            processed += chunk_size
+            remaining -= chunk_size
+
+            # PREFILL_CLEARCACHE (growing shapes never reuse; flush garbage).
+            if chunk_index % _PREFILL_CLEARCACHE_EVERY == 0:
+                mx.clear_cache()
+            chunk_index += 1
+            prompt_progress_callback(processed, total)
+
+    # Post-loop: process the remaining 1 token + 1 extra, matching
+    # stream_generate's cache side effects (the caller trims them).
+    for _ in range(2):
+        with mx.stream(generation_stream):
+            model(prompt[-1:][None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+
+    mx.clear_cache()  # PREFILL_CLEARCACHE
+    with mx.stream(generation_stream):
+        mx.eval([c.state for c in prompt_cache])  # type: ignore
+    prompt_progress_callback(total, total)
+
+
 def pipeline_parallel_prefill(
     model: Model,
     prompt: mx.array,
@@ -250,6 +333,18 @@ def pipeline_parallel_prefill(
 
                 flush_prefill_sends()
 
+                # PREFILL_CLEARCACHE (growing shapes never reuse; flush garbage).
+                # 2026-08-07: cadence made configurable via EXO_PREFILL_CLEARCACHE_EVERY
+                # (default 2, preserving prior behaviour). Set to 1 to flush after EVERY
+                # chunk. Rationale: on an MoE model each chunk activates a distinct set of
+                # experts, so a smaller chunk + more frequent flush means fewer expert
+                # tensors faulted and held per Metal command buffer. Measured on
+                # DeepSeek-V4-Pro: chunk 128 -> 32 took generation from 34 to 122 tracker
+                # lines before the 5s watchdog fired, i.e. the fault-in cost really does
+                # scale with chunk size rather than being one indivisible per-layer touch.
+                if i % _PREFILL_CLEARCACHE_EVERY == 0:
+                    mx.clear_cache()
+
                 prompt_progress_callback(processed, total)
 
             for _ in range(n_trailing):
@@ -266,6 +361,7 @@ def pipeline_parallel_prefill(
             quantize_cache_fn(_prompt_cache)
         flush_prefill_sends()
 
+    mx.clear_cache()  # PREFILL_CLEARCACHE
     assert _prompt_cache is not None
     with mx.stream(generation_stream):
         mx.eval([c.state for c in _prompt_cache])  # type: ignore
@@ -306,6 +402,21 @@ def prefill(
     has_ssm = has_non_kv_caches(cache)
     snapshots: list[CacheSnapshot] = []
 
+    # 2026-07-19 SPARSE SNAPSHOT PATCH (Eric-approved, all 4 nodes).
+    # Snapshotting on EVERY chunk retains ~40 MiB x n_chunks of fp32 SSM state
+    # on hybrid models (Qwen3.5-397B: 45/60 GatedDeltaNet layers) and
+    # Metal-OOM'd m3b at ~chunk 340/400 of a 25.5k-token prefill (SIGABRT
+    # 08:47:13, Python-2026-07-19-084714.ips). _find_nearest_snapshot()
+    # (cache.py) takes the nearest snapshot <= target and tolerates sparse
+    # lists by design; worst case recomputes N*chunk tokens on a prefix-cache
+    # resume. Keep every Nth snapshot PLUS the final two chunks: the
+    # end-of-prefill +2 rollback needs a snapshot at <= total-2, and a
+    # snapshot taken AT `total` does not qualify, so the penultimate one
+    # preserves that fast path exactly. EXO_SSM_SNAPSHOT_EVERY=1 restores the
+    # original every-chunk behaviour.
+    _snap_every = max(1, int(os.environ.get("EXO_SSM_SNAPSHOT_EVERY", "8")))
+    _snap_state = {"idx": 0, "last": 0}
+
     # TODO(evan): kill the callbacks/runner refactor
     def progress_callback(processed: int, total: int) -> None:
         elapsed = time.perf_counter() - start_time
@@ -314,7 +425,14 @@ def prefill(
             f"Prefill progress: {processed}/{total} tokens ({tok_per_sec:.1f} tok/s)"
         )
         if has_ssm:
-            snapshots.append(snapshot_ssm_states(cache))
+            _chunk = max(1, processed - _snap_state["last"])
+            _snap_state["last"] = processed
+            _snap_state["idx"] += 1
+            if (
+                _snap_state["idx"] % _snap_every == 0
+                or processed + 2 * _chunk >= total
+            ):
+                snapshots.append(snapshot_ssm_states(cache))
 
         if on_prefill_progress is not None:
             on_prefill_progress(processed, total)
@@ -331,7 +449,7 @@ def prefill(
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
-    prefill_step_size = 4096
+    prefill_step_size = min(int(os.environ.get("EXO_PREFILL_STEP_SIZE", "128")), 128)  # 2026-07-12: was 4096; threshold+chunk(//nodes) for long-prompt prefill OOM
 
     try:
         if is_pipeline and num_tokens >= prefill_step_size:
@@ -348,7 +466,22 @@ def prefill(
                 distributed_prompt_progress_callback=distributed_prompt_progress_callback,
                 group=group,
             )
+        elif num_tokens >= prefill_step_size:
+            # SINGLE-NODE long prompt: stream_generate would chunk but never
+            # flush MLX's buffer pool between chunks, so growing-shape
+            # attention buffers accumulate until the node OOMs (2026-08-07).
+            # Same chunk+flush contract as the pipeline path.
+            single_node_prefill(
+                model=model,
+                prompt=prompt_tokens,
+                prompt_cache=cache,
+                prefill_step_size=prefill_step_size,
+                kv_group_size=KV_GROUP_SIZE,
+                kv_bits=KV_BITS,
+                prompt_progress_callback=combined_progress_callback,
+            )
         else:
+            # Short prompt: one shot is cheaper than the chunk machinery.
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
             for _ in stream_generate(

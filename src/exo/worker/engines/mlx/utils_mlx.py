@@ -832,7 +832,7 @@ def set_wired_limit_for_model(model_size: Memory):
         int(mx.device_info()["max_recommended_working_set_size"])
     )
     live_available = Memory.from_bytes(int(psutil.virtual_memory().available))
-    fraction = float(os.environ.get("EXO_WIRED_LIMIT_FRACTION", "0.97"))
+    fraction = float(os.environ.get("EXO_WIRED_LIMIT_FRACTION", "0.99"))  # 2026-07-12: 0.97->0.99, spike needs room UNDER the cap (see patch_exo_wired_fraction.py)
     wired_limit = Memory.from_bytes(
         min(int(live_available.in_bytes * fraction), device_rec_size.in_bytes)
     )
@@ -846,6 +846,16 @@ def set_wired_limit_for_model(model_size: Memory):
             "https://github.com/ml-explore/mlx-lm/tree/main#large-models"
         )
     mx.set_wired_limit(wired_limit.in_bytes)
+    # 2026-07-12: near the wired limit, clamp MLX's buffer cache so first-pass
+    # transients (kernel JIT, MoE scratch) are freed instead of hoarded --
+    # MLX's own large-model guidance. Tunable: EXO_NEAR_LIMIT_CACHE_MB.
+    if model_size.in_bytes > 0.9 * wired_limit.in_bytes:
+        _cache_mb = int(os.environ.get("EXO_NEAR_LIMIT_CACHE_MB", "512"))
+        mx.set_cache_limit(_cache_mb * 1024**2)
+        logger.info(
+            f"Near wired limit: MLX buffer cache clamped to {_cache_mb} MB "
+            "(EXO_NEAR_LIMIT_CACHE_MB)"
+        )
     logger.info(
         f"Wired limit set to {wired_limit} "
         f"({fraction:.0%} of {live_available} live available; "

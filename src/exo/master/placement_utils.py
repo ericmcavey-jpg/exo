@@ -48,8 +48,32 @@ _WIRED_LIMIT_FRACTION = float(os.environ.get("EXO_WIRED_LIMIT_FRACTION", "0.97")
 #   M3 Ultra, 96GB total   -> 82.47 GiB
 #   M3/M4 Max, 128GB total -> 115.59 GiB
 _DEVICE_RECOMMENDED_MAX_GIB_BY_TOTAL_GB = [
-    (100, 115.59),  # >=100GB total (128GB M3/M4 Max nodes)
-    (0, 82.47),  # <100GB total (96GB M3 Ultra nodes)
+    # 2026-07-12: lowered from 115.59/82.47 to leave a fixed ~17 GiB Metal
+    # shader-spike buffer below physical. GLM-5.2 4-node load OOM'd on nodes
+    # with only ~11 GiB buffer (m3b 724x) while >=17 GiB nodes were clean.
+    # MUST stay in sync with exo_launch_bigmodel.sh RESERVE_GIB (default 17).
+    # 2026-08-03: added a 256GB (M3 Ultra, e.g. m3c) tier. Before this, a 256GB
+    # node fell into the >=100 bucket and was capped at 111 GiB -- treated as a
+    # 128GB node -- so proportional allocation gave it ~22% of layers instead of
+    # its rightful ~36%, wasting ~120 GiB and choking the 96GB nodes at prefill
+    # peak. 232.0 matches m3c's already-set iogpu.wired_limit_mb (237733 = 232 GiB),
+    # leaving a ~24 GiB buffer below its 256 GiB physical.
+    # 2026-08-07: 232.0 -> 239.0. The 232.0 was pinned to an iogpu.wired_limit_mb of
+    # 237733 that no longer exists: exo_launch_bigmodel.sh's retune step now sets 249344
+    # (243.5 GiB) on the 256GB nodes every launch, so this table -- which this comment
+    # block itself says MUST stay in sync with the sysctl -- had drifted ~11 GiB BELOW
+    # reality. Because _effective_available() takes min(0.97 * live_available, this cap),
+    # the stale constant silently became the binding constraint: DeepSeek-V4-Pro (791 GiB,
+    # 61 layers) PINFAILed with "m3c requires 233.51 GB for 18 layers, but only has 232.00
+    # GB available" while m3c actually had 245 GiB free and a 243.5 GiB ceiling. Nothing
+    # observable moved it -- purge, killing the wallpaper stack, raising the sysctl, and a
+    # full fleet restart all left it at exactly 232.00, because it was never reading any of
+    # them. 239.0 = 256 - 17, keeping the 17 GiB Metal shader-spike buffer the note above
+    # earned the hard way, and staying below the live sysctl so placement remains the
+    # conservative side of the pair.
+    (200, 239.0),  # >=200GB total (256GB nodes): matches iogpu.wired_limit_mb
+    (100, 111.0),  # >=100GB total (128GB nodes): 128 - 17
+    (0, 79.0),     # <100GB total (96GB nodes): 96 - 17
 ]
 
 
@@ -390,9 +414,25 @@ def _find_connection_ip(
     cycle_digraph: Topology,
 ) -> Generator[str, None, None]:
     """Find all IP addresses that connect node i to node j."""
+    import ipaddress as _ipa
     for connection in cycle_digraph.get_all_connections_between(node_i, node_j):
         if isinstance(connection, SocketConnection):
-            yield connection.sink_multiaddr.ip_address
+            _ip = connection.sink_multiaddr.ip_address
+            # PATCH 2026-08-05: never offer a loopback / link-local / unspecified address
+            # as a ring connection IP. fe80::1%lo0 (loopback link-local) was discovered as a
+            # SocketConnection sink and won selection for a NEIGHBOUR pair (its TB peer conn
+            # was absent from the candidate set), so activations routed to loopback and decode
+            # hung with zero tokens. Filtering here means a genuinely unroutable neighbour pair
+            # raises loudly at placement ("requires connectivity between neighbouring nodes")
+            # instead of silently hanging.
+            _bare = _ip.split("%", 1)[0]
+            try:
+                _a = _ipa.ip_address(_bare)
+                if _a.is_loopback or _a.is_link_local or _a.is_unspecified:
+                    continue
+            except ValueError:
+                pass
+            yield _ip
 
 
 def find_ip_prioritised(

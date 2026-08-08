@@ -290,16 +290,26 @@ def _scan_model_directory(
     entries_by_path: dict[str, FileListEntry] = {}
 
     if recursive:
-        for dirpath, _, filenames in os.walk(model_dir):
+        for dirpath, dirnames, filenames in os.walk(model_dir):
+            # FLEET PATCH 2026-07-31: never descend into macOS volume-metadata dirs. A
+            # quasi-local model symlinks to a mounted APFS volume root whose .fseventsd
+            # journal rotates constantly; walking it then stat()-ing races -> FileNotFoundError
+            # -> the whole listing throws -> the model never registers "complete" -> 45-min
+            # RunnerReady timeout (mis-diagnosed as slow NFS on DSv3.2).
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for filename in filenames:
-                if filename.endswith(".partial"):
+                if filename.endswith(".partial") or filename.startswith("."):
                     continue
                 full_path = Path(dirpath) / filename
                 rel_path = str(full_path.relative_to(model_dir))
+                try:
+                    _sz = full_path.stat().st_size
+                except (FileNotFoundError, OSError):
+                    continue  # ephemeral file vanished mid-walk; skip, don't abort the listing
                 entries_by_path[rel_path] = FileListEntry(
                     type="file",
                     path=rel_path,
-                    size=full_path.stat().st_size,
+                    size=_sz,
                 )
     else:
         for item in model_dir.iterdir():

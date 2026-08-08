@@ -169,6 +169,14 @@ class PipelineLastLayer(CustomMlxLayer):
         ).arguments.get("cache", None)
 
         output: mx.array = self.original_layer(x, *args, **kwargs)
+        # 2026-07-12: GlmMoeDsa layers return (h, topk_indices) tuples (mlx-lm
+        # PR #1410 cross-layer indexer sharing). Collectives below operate on h
+        # only; re-tuple on return so the model's layer loop can unpack. See
+        # patch_exo_pipeline_tuple.py for the full rationale.
+        _extra = None
+        if isinstance(output, tuple):
+            _extra = output[1:]
+            output = output[0]
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
@@ -199,7 +207,7 @@ class PipelineLastLayer(CustomMlxLayer):
             ]
             mx.eval(output)
 
-        return output
+        return output if _extra is None else (output, *_extra)
 
 
 def set_pipeline_prefill(model: nn.Module, is_prefill: bool) -> None:

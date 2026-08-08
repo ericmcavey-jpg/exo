@@ -161,9 +161,13 @@ class ExoBatchGenerator:
         is_exact_hit = False
         prompt_tokens = all_prompt_tokens
 
-        if self.kv_prefix_cache is not None and (
-            not is_bench or task_params.use_prefix_cache
-        ):
+        # 2026-07-19 RETENTION FIX (Eric-approved): honor use_prefix_cache=False.
+        # The old condition saved/loaded the prefix cache for EVERY non-bench
+        # request, so a "no cache" request still retained its full prompt entry
+        # + SSM snapshots. That retained state is why a second large request on
+        # an instance OOM'd (4bit 03:50, 6bit 09:47 second-request deaths) and
+        # why every large request currently costs a ~15-min mesh reload.
+        if self.kv_prefix_cache is not None and task_params.use_prefix_cache:
             cache, remaining_tokens, matched_index, is_exact_hit = (
                 self.kv_prefix_cache.get_kv_cache(
                     self.model, all_prompt_tokens, media_regions=media_regions
@@ -264,7 +268,7 @@ class ExoBatchGenerator:
                 c.values = c._trim(trim_size, c.values)
                 c._idx = c.max_size
 
-        if not is_bench or task_params.use_prefix_cache:
+        if task_params.use_prefix_cache:  # 2026-07-19 retention fix (see above)
             min_prefix_hit_length = max(
                 1000, system_prompt_token_count(task_params, self.tokenizer)
             )

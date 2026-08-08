@@ -97,7 +97,7 @@ card_cache = _CardCache()
 
 
 _vision_config_cache: dict[str, "VisionCardConfig | None"] = {}
-_VISION_DETECT_TIMEOUT_SECONDS = 2.0
+_VISION_DETECT_TIMEOUT_SECONDS = 30.0  # was 2.0 -- op takes 0.02s unloaded; 2s only trips under process contention (event-log replay / card scan), and the timeout LEAKS a thread that starves the pool resolve_existing_model needs -> no DownloadCompleted -> LoadModel never fires -> RunnerIdle forever (2026-08-04)
 
 
 class _TimedOut:
@@ -354,6 +354,7 @@ class ConfigData(BaseModel):
             ["Qwen3_5ForConditionalGeneration"],
             ["Qwen3VLForConditionalGeneration"],
             ["MiniMaxM2ForCausalLM"],
+            ["MiMoV2FlashForCausalLM"],
             ["LlamaForCausalLM"],
             ["GptOssForCausalLM"],
             ["Step3p5ForCausalLM"],

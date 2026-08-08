@@ -188,16 +188,40 @@ class Worker:
                             ] = img
 
     async def _reconcile_custom_cards(self) -> None:
+        # HERMES_CARD_DURABILITY_V1 (2026-07-27) — do not remove this guard.
+        #
+        # Upstream #2024 ("Store custom model cards in State") made the
+        # replicated State the SOLE source of truth for
+        # ~/.exo/custom_model_cards and had this loop unlink, once per second,
+        # every on-disk card whose model_id was absent from State.
+        #
+        # The only writer into State is POST /models ->
+        # ModelCard.fetch_from_hf(), which requires the id to resolve on
+        # HuggingFace. A HAND-AUTHORED card for a local-only quant
+        # (mlx-community/Kimi-K2.5-2.5bit, pipenetwork/Ornith-1.0-397B-mlx-6bit,
+        # pipenetwork/MiniMax-M3-MLX-4bit, ...) therefore can NEVER enter State.
+        # Meanwhile scripts/exo_mesh_reset.sh does `rm -rf ~/.exo/event_log` on
+        # every node, which empties State. Net effect, observed 2026-07-27:
+        # every mesh reset silently deleted those cards on all four nodes
+        # within one second of restart, and the loss resurfaced much later as
+        # an unexplained PINFAIL at placement time.
+        #
+        # Fix: only delete a card that THIS process has actually observed in
+        # State — i.e. one State owns and the user has since deleted, which is
+        # the cluster-wide-delete behaviour #2024 was written for. Cards State
+        # has no opinion about are left on disk, untouched.
+        state_managed: set[ModelId] = set()
         while True:
             await anyio.sleep(1)
             target = dict(self.state.custom_model_cards)
             for model_id, card in target.items():
+                state_managed.add(model_id)
                 if card_cache.get(model_id) == card:
                     continue
                 await card_cache.save(card)
 
             for card in await card_cache.list_all():
-                if card.model_id not in target:
+                if card.model_id not in target and card.model_id in state_managed:
                     await card_cache.pop(card.model_id)
 
     async def plan_step(self):

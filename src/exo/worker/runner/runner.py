@@ -282,6 +282,68 @@ class Runner:
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
 
+                # --- cpu-stream residency warmup (gradual wiring) ---
+                # 2026-08-07: this pass MUST honor EXO_SKIP_WARMUP. It sat ABOVE the
+                # EXO_SKIP_WARMUP check below, so the flag only ever guarded
+                # generator.warmup() while THIS loop -- the expensive half -- ran
+                # unconditionally. It touches every parameter, converting lazily-mmap'd
+                # NFS-backed weights into hard residency. On DeepSeek-V4-Pro (791 GiB,
+                # 18 layers = 233.5 GiB on m3c) that walk drove a 256 GiB node past its
+                # limit and jetsam SIGKILLed the runner ~2 min into StartWarmup, taking
+                # the whole 6-node ring down with it -- after all six had already reached
+                # RunnerReady. The try/except made it look safe; a SIGKILL is not
+                # catchable, so "non-fatal" was never true.
+                # Lazy paging on the first real request is the proven path for models
+                # this size (GLM-5.2 604 GiB: 9s and 23s first probes, both clean).
+                # EXO_CPU_RESIDENCY=1 forces the residency pass back ON while leaving
+                # EXO_SKIP_WARMUP=1 in place, so generator.warmup() -- which is separately
+                # fatal on NFS-backed models this size -- stays skipped. These are two
+                # different things and conflating them under one flag is what made the
+                # pass run unconditionally in the first place.
+                # WHY TRY IT AGAIN (2026-08-07): it is the only mechanism that removes
+                # weight fault-in from the Metal command buffer ENTIRELY (CPU stream, no
+                # watchdog) rather than subdividing it. Chunking hit its asymptote at
+                # chunk=16 (m3c tracker lines 34 -> 122 -> 183, i.e. 3.6x then 1.5x).
+                # It OOM'd before under conditions since fixed: 18 layers + lm_head on the
+                # NFS-serving node, no purge loops, unstripped baseline. 791.3 GiB against
+                # 819.4 GiB effective says it fits -- barely.
+                _force_residency = os.environ.get("EXO_CPU_RESIDENCY") == "1"
+                _skip_warmup = (
+                    os.environ.get("EXO_SKIP_WARMUP") == "1" and not _force_residency
+                )
+                if _force_residency:
+                    logger.info("EXO_CPU_RESIDENCY=1: running cpu residency pass")
+                if _skip_warmup:
+                    logger.info(
+                        "skipping cpu residency pass because EXO_SKIP_WARMUP=1 "
+                        "(weights page in on first request)"
+                    )
+                try:
+                    import time as _t
+                    import mlx.core as _mx
+                    from mlx.utils import tree_flatten as _tf
+                    _rm = None if _skip_warmup else getattr(self.generator, "model", None)
+                    if _rm is not None:
+                        _t0 = _t.time()
+                        _params = _tf(_rm.parameters())
+                        _n = len(_params)
+                        _done = 0
+                        for _, _p in _params:
+                            # CPU-stream touch: faults pages in with NO Metal watchdog.
+                            _mx.eval(_mx.sum(_p.view(_mx.uint8), stream=_mx.cpu))
+                            _done += 1
+                            if _done % 50 == 0:
+                                logger.info(
+                                    f"cpu residency: {_done}/{_n} params touched "
+                                    f"({_t.time() - _t0:.0f}s)"
+                                )
+                        logger.info(
+                            f"cpu residency complete: {_n} params resident in "
+                            f"{_t.time() - _t0:.0f}s"
+                        )
+                except Exception as _re:
+                    logger.warning(f"cpu residency warmup failed (non-fatal): {_re}")
+
                 if os.environ.get("EXO_SKIP_WARMUP") == "1":
                     logger.info("skipping runner warmup because EXO_SKIP_WARMUP=1")
                 else:

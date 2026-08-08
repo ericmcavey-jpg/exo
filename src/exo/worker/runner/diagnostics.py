@@ -6,6 +6,9 @@ import re
 from collections import deque
 from typing import final
 
+from typing import Annotated
+from pydantic import BeforeValidator
+
 from exo.utils.pydantic_ext import TaggedModel
 
 _EVIDENCE_LINES = 4
@@ -28,7 +31,10 @@ _RING_TRANSPORT_ABORT_RE = re.compile(
 
 class BaseRunnerDiagnostic(TaggedModel):
     message: str
-    evidence: tuple[str, ...] = ()
+    # tuple serializes to a JSON array; strict=True then rejects the list on
+    # re-validation (self round-trip failure -> death reports dropped by the
+    # router, 2026-07-16 RCA). Coerce back to tuple on intake.
+    evidence: Annotated[tuple[str, ...], BeforeValidator(tuple)] = ()
 
 
 class RunnerMetalGpuTimeout(BaseRunnerDiagnostic):

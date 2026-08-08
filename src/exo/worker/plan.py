@@ -272,6 +272,16 @@ def _ready_to_warmup(
 
         is_runner_loaded = isinstance(runner.status, RunnerLoaded)
 
+        # skip-warmup is gossip-independent: when EXO_SKIP_WARMUP=1 the warmup
+        # task is a no-op Loaded->Ready hop with NO distributed forward pass,
+        # so waiting on gossiped peer states is pointless -- and deadlocks when
+        # event propagation drops updates (2026-07-12: 3/4 runners stuck at
+        # Loaded with stale views while the model sat fully loaded).
+        import os as _os
+
+        if is_runner_loaded and _os.environ.get("EXO_SKIP_WARMUP") == "1":
+            return StartWarmup(instance_id=instance.instance_id)
+
         assert device_rank < world_size
         assert device_rank >= 0
 

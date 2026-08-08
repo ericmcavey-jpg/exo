@@ -12,6 +12,7 @@ from exo.master.placement_utils import (
     get_smallest_cycles,
 )
 from exo.shared.models.model_cards import ModelId
+from exo.shared.types.topology import Cycle
 from exo.shared.topology import Topology
 from exo.shared.types.backends import Backend
 from exo.shared.types.commands import (
@@ -241,6 +242,33 @@ def place_instance(
             ),
         ),
     )
+
+    # rotate: largest-RAM node takes the last pipeline rank (LM head = the
+    # single largest matmul). A rotation of a ring preserves neighbor adjacency
+    # (same Thunderbolt links), only the starting point changes. Added
+    # 2026-07-12 after rank-3-on-96GB-node died in a Metal GPU watchdog abort
+    # during GLM-5.2 warmup. Pipeline sharding only; CFG-parallel has its own
+    # rank geometry. Disable with EXO_NO_RANK_ROTATE=1.
+    import os as _os
+
+    from loguru import logger as _rr_logger
+
+    if (
+        len(selected_cycle) > 1
+        and command.sharding == Sharding.Pipeline
+        and _os.environ.get("EXO_NO_RANK_ROTATE") != "1"
+    ):
+        _ids = list(selected_cycle.node_ids)
+        _big = max(
+            range(len(_ids)), key=lambda i: node_memory[_ids[i]].ram_total.in_bytes
+        )
+        _rot = (_big + 1) % len(_ids)
+        if _rot != 0:
+            selected_cycle = Cycle(node_ids=_ids[_rot:] + _ids[:_rot])
+        _rr_logger.info(
+            f"rank-rotate: last pipeline rank -> {_ids[_big]} "
+            f"({node_memory[_ids[_big]].ram_total.in_gb:.0f} GB)"
+        )
 
     # Single-node: force Pipeline/Ring (Tensor and Jaccl require multi-node)
     if len(selected_cycle) == 1:

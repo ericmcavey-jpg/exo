@@ -1,0 +1,44 @@
+# CUSTOM CARD — GLM-5.2 MLX 6-bit (precision-test seat for the architect bakeoff).
+# Created 2026-08-06. Authored from config.json per the standing rule (never
+# POST /models/add for a local quant). Sibling of mlx-community--GLM-5.2-mxfp4.toml;
+# SAME architecture, higher precision — only quantization and storage_size differ.
+#
+# PROVENANCE — every numeric field read from the DEPLOYED bundle on m3c:
+#   /Volumes/glm52_6bit/GLM-5.2-6bit/config.json
+#     model_type=glm_moe_dsa  num_hidden_layers=78  hidden_size=6144
+#     num_attention_heads=64  num_key_value_heads=64  vocab_size=154880
+#     max_position_embeddings=1048576
+#     quantization={group_size: 64, bits: 6, mode: affine}
+#   storage_size = du of the model dir on the attached volume = 604157227008 bytes
+#     (562.7 GiB / 604.2 GB) — matches the 604.1GB download-verify figure (121/121 shards).
+#
+# supports_tensor: SAME architecture (GlmMoeDsa) as the mxfp4 card, so the 2026-07-30
+# finding carries over VERBATIM and is LOAD-BEARING here too: supports_tensor=false forces
+# PIPELINE sharding, which loads ~5x faster but then SIGABRTs on the first generation
+# ([ring] Too many send/recv errors -> Fatal Python error: Aborted, signal=6) on a clean
+# ring. Do NOT flip this to chase load time. Keep true.
+#
+# MEMORY NOTE (single-copy invariant): this model exists as ONE sparsebundle on m3c
+# (~/exo-models-share/glm52_6bit.sparsebundle), NFS-exported; every other node ATTACHES it.
+# A peer showing /private/tmp/glm6_mounted as LOCAL /dev/diskN apfs is that ATTACHED
+# sparsebundle, NOT a second copy.
+#
+# SIZE WARNING: 604 GB vs the mxfp4's 395 GB. Fleet aggregate is ~960 GB, so this is a
+# much tighter placement than the 4-bit. Verify /state shard_assignments after load and
+# keep the 96 GB nodes (m3a/m3b) from being overloaded — the Kimi-placement lesson.
+model_id = "pipenetwork/GLM-5.2-MLX-6bit"
+n_layers = 78
+hidden_size = 6144
+num_key_value_heads = 64
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "glm"
+quantization = "6bit"
+base_model = "GLM-5.2"
+capabilities = ["text", "thinking"]
+reasoning_dialect = "post_last_user"
+context_length = 1048576
+backends = ["MlxMetal", "MlxCuda", "MlxCpu"]
+
+[storage_size]
+in_bytes = 604157227008
