@@ -24,6 +24,16 @@ from mlx_lm.models.llama import create_attention_mask
 from exo.worker.runner.bootstrap import logger
 
 _EVAL_EVERY_N_LAYERS = int(os.environ.get("EXO_EVAL_EVERY_N_LAYERS", "0"))
+# DECODE cadence, separate and OFF by default (2026-08-08). The eval exists to
+# break a LONG Metal command buffer — a prefill chunk over many layers, or a
+# cold fault-in — so the 5s watchdog cannot fire. Decode is one token through
+# the shard: the buffer is tiny and the watchdog was never the risk. Applying
+# the prefill cadence to decode cost ~30 forced GPU syncs PLUS ~30 fsync'd log
+# writes PER TOKEN PER NODE, which is the dominant term in DeepSeek-V3.2's
+# 0.15 tok/s. Set EXO_EVAL_EVERY_N_LAYERS_DECODE only if a decode-time GPU
+# timeout is ever actually observed.
+_EVAL_EVERY_N_LAYERS_DECODE = int(
+    os.environ.get("EXO_EVAL_EVERY_N_LAYERS_DECODE", "0"))
 _TRACKER_PATH = os.environ.get("EXO_EVAL_TRACKER_PATH", "/tmp/exo_eval_tracker.log")
 _call_counter = 0
 
@@ -62,12 +72,15 @@ def _patched_llama_call(self, inputs, cache=None, input_embeddings=None):
             h, cache[self.swa_idx], window_size=self.sliding_window
         )
 
+    is_prefill = h.shape[1] > 1
     for i, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
         mask = swa_mask if layer.use_sliding else fa_mask
         h = layer(h, mask, cache=layer_cache)
-        if _EVAL_EVERY_N_LAYERS and (i + 1) % _EVAL_EVERY_N_LAYERS == 0:
+        _eval_n = _EVAL_EVERY_N_LAYERS if is_prefill else _EVAL_EVERY_N_LAYERS_DECODE
+        if _eval_n and (i + 1) % _eval_n == 0:
             mx.eval(h)
-            _write_tracker(f"call#{call_id} layer {i + 1}/{n_layers} eval OK")
+            if is_prefill:
+                _write_tracker(f"call#{call_id} layer {i + 1}/{n_layers} eval OK")
 
     out = self.norm(h)
     _write_tracker(f"call#{call_id} DONE (all {n_layers} layers)")
@@ -113,11 +126,14 @@ def _patched_dsv32_call(self, x, cache=None):
 
     n_layers = self.num_layers
     _write_tracker(f"dsv32 call#{call_id} START n_layers={n_layers}")
+    is_prefill = h.shape[1] > 1
     for i in range(self.num_layers):
         h = self.layers[self.start_idx + i](h, mask, cache[i])
-        if _EVAL_EVERY_N_LAYERS and (i + 1) % _EVAL_EVERY_N_LAYERS == 0:
+        _eval_n = _EVAL_EVERY_N_LAYERS if is_prefill else _EVAL_EVERY_N_LAYERS_DECODE
+        if _eval_n and (i + 1) % _eval_n == 0:
             mx.eval(h)
-            _write_tracker(f"dsv32 call#{call_id} layer {i + 1}/{n_layers} eval OK")
+            if is_prefill:
+                _write_tracker(f"dsv32 call#{call_id} layer {i + 1}/{n_layers} eval OK")
 
     if pipeline_rank != 0:
         h = mx.distributed.send(h, (pipeline_rank - 1) % pipeline_size)
@@ -194,9 +210,11 @@ def _patched_glm_moe_dsa_call(self, x, cache=None):
         h, prev_topk_indices = self.layers[self.start_idx + i](
             h, mask, cache[i], prev_topk_indices
         )
-        if _EVAL_EVERY_N_LAYERS and (i + 1) % _EVAL_EVERY_N_LAYERS == 0:
+        _eval_n = _EVAL_EVERY_N_LAYERS if is_prefill else _EVAL_EVERY_N_LAYERS_DECODE
+        if _eval_n and (i + 1) % _eval_n == 0:
             mx.eval(h)
-            _write_tracker(f"glm call#{call_id} layer {i + 1}/{n_layers} eval OK")
+            if is_prefill:
+                _write_tracker(f"glm call#{call_id} layer {i + 1}/{n_layers} eval OK")
         # Purge on its own cadence. It can only free buffers the eval above has
         # already released, so keep it a multiple of _EVAL_EVERY_N_LAYERS.
         if (
@@ -258,9 +276,11 @@ def _patched_dsv4_call(self, inputs, cache=None):
     _write_tracker(f"dsv4 call#{call_id} START n_layers={n_layers} seq={S}")
     for i, layer in enumerate(self.layers):
         h = layer(h, cache[i], inputs)
-        if _EVAL_EVERY_N_LAYERS and (i + 1) % _EVAL_EVERY_N_LAYERS == 0:
+        _eval_n = _EVAL_EVERY_N_LAYERS if is_prefill else _EVAL_EVERY_N_LAYERS_DECODE
+        if _eval_n and (i + 1) % _eval_n == 0:
             mx.eval(h)
-            _write_tracker(f"dsv4 call#{call_id} layer {i + 1}/{n_layers} eval OK")
+            if is_prefill:
+                _write_tracker(f"dsv4 call#{call_id} layer {i + 1}/{n_layers} eval OK")
         if (
             is_prefill
             and _CLEAR_CACHE_EVERY_N_LAYERS
