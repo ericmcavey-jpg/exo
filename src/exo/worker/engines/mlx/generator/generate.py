@@ -449,7 +449,22 @@ def prefill(
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
-    prefill_step_size = min(int(os.environ.get("EXO_PREFILL_STEP_SIZE", "128")), 128)  # 2026-07-12: was 4096; threshold+chunk(//nodes) for long-prompt prefill OOM
+    prefill_step_size = int(os.environ.get("EXO_PREFILL_STEP_SIZE", "128"))
+    if not is_pipeline:
+        prefill_step_size = int(
+            os.environ.get("EXO_TENSOR_PREFILL_STEP_SIZE", str(prefill_step_size))
+        )
+        long_threshold = max(
+            1, int(os.environ.get("EXO_TENSOR_PREFILL_LONG_THRESHOLD", "24576"))
+        )
+        if num_tokens > long_threshold:
+            prefill_step_size = int(
+                os.environ.get("EXO_TENSOR_PREFILL_LONG_STEP_SIZE", "128")
+            )
+    prefill_step_cap = max(
+        1, int(os.environ.get("EXO_PREFILL_STEP_CAP", "128"))
+    )
+    prefill_step_size = min(prefill_step_size, prefill_step_cap)
 
     try:
         if is_pipeline and num_tokens >= prefill_step_size:
