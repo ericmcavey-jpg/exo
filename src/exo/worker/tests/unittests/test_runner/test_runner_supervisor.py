@@ -6,15 +6,20 @@ import pytest
 from exo.shared.models.model_cards import ModelId
 from exo.shared.types.chunks import ErrorChunk
 from exo.shared.types.common import CommandId, NodeId
-from exo.shared.types.events import ChunkGenerated, Event, RunnerStatusUpdated
-from exo.shared.types.tasks import Task, TaskId, TextGeneration
+from exo.shared.types.events import (
+    ChunkGenerated,
+    Event,
+    RunnerStatusUpdated,
+    TaskStatusUpdated,
+)
+from exo.shared.types.tasks import Task, TaskId, TaskStatus, TextGeneration
 from exo.shared.types.text_generation import (
     InputMessage,
     InputMessageContent,
     TextGenerationTaskParams,
 )
 from exo.shared.types.worker.instances import BoundInstance, InstanceId
-from exo.shared.types.worker.runners import RunnerFailed, RunnerId
+from exo.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerRunning
 from exo.utils.async_process import AsyncProcess
 from exo.utils.channels import channel, mp_channel
 from exo.worker.runner.bootstrap import RunnerTerminationError
@@ -95,3 +100,55 @@ async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> 
     event_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
+
+
+@pytest.mark.anyio
+async def test_cancel_waits_for_runner_resource_release_acknowledgement() -> None:
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, cancel_receiver = mp_channel[TaskId]()
+    runner_event_sender, runner_event_receiver = mp_channel[
+        Event | RunnerTerminationError
+    ]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    proc = cast(AsyncProcess, cast(object, _DeadProcess()))
+    handler = await RunnerStdioHandler.create(
+        stdout_rx=proc.stdout, stderr_rx=proc.stderr
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=proc,
+        _runner_stdio_handler=handler,
+        initialize_timeout=400,
+        _ev_recv=runner_event_receiver,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    task_id = TaskId("task-a")
+    supervisor.in_progress[task_id] = cast(Task, object())
+    supervisor.status = RunnerRunning()
+    released = anyio.Event()
+
+    async def emulate_runner() -> None:
+        assert await cancel_receiver.receive_async() == task_id
+        assert not released.is_set()
+        await runner_event_sender.send_async(
+            TaskStatusUpdated(task_id=task_id, task_status=TaskStatus.Cancelled)
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+        tg.start_soon(emulate_runner)
+        assert await supervisor.cancel_task(task_id) is True
+        released.set()
+        tg.cancel_scope.cancel()
+
+    assert task_id in supervisor.cancelled
+    assert task_id not in supervisor.in_progress

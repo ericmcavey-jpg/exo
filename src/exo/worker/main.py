@@ -350,10 +350,15 @@ class Worker:
                 case CancelTask(
                     cancelled_task_id=cancelled_task_id, runner_id=runner_id
                 ):
-                    await self.runners[runner_id].cancel_task(cancelled_task_id)
+                    released = await self.runners[runner_id].cancel_task(
+                        cancelled_task_id
+                    )
                     await self.event_sender.send(
                         TaskStatusUpdated(
-                            task_id=task.task_id, task_status=TaskStatus.Complete
+                            task_id=task.task_id,
+                            task_status=(
+                                TaskStatus.Complete if released else TaskStatus.TimedOut
+                            ),
                         )
                     )
                 case ImageEdits() if task.task_params.total_input_chunks > 0:

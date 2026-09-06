@@ -292,6 +292,7 @@ class API:
         self._image_generation_queues: dict[
             CommandId, Sender[ImageChunk | ErrorChunk]
         ] = {}
+        self._cancelled_commands: set[CommandId] = set()
         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -303,6 +304,7 @@ class API:
         self._system_id = SystemId()
         self._text_generation_queues = {}
         self._image_generation_queues = {}
+        self._cancelled_commands = set()
         self.unpause(result_clock)
         self.event_receiver.close()
         self.event_receiver = event_receiver
@@ -736,7 +738,7 @@ class API:
         )
 
     async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
-        """Cancel an active command by closing its stream and notifying workers."""
+        """Cancel only after every runner acknowledges resource release."""
         sender = self._text_generation_queues.get(
             command_id
         ) or self._image_generation_queues.get(command_id)
@@ -746,11 +748,36 @@ class API:
                 detail="Command not found or already completed",
             )
 
+        seen_task = any(
+            getattr(task, "command_id", None) == command_id
+            for task in self.state.tasks.values()
+        )
+        self._cancelled_commands.add(command_id)
         await self._send(TaskCancelled(cancelled_command_id=command_id))
         sender.close()
 
+        with anyio.move_on_after(30.0) as scope:
+            while True:
+                matching = [
+                    task
+                    for task in self.state.tasks.values()
+                    if getattr(task, "command_id", None) == command_id
+                ]
+                seen_task = seen_task or bool(matching)
+                if seen_task and not matching:
+                    break
+                await anyio.sleep(0.01)
+        if scope.cancel_called:
+            raise HTTPException(
+                status_code=HTTPStatus.GATEWAY_TIMEOUT,
+                detail=(
+                    "Cancellation requested, but not all runners acknowledged "
+                    "resource release within 30 seconds"
+                ),
+            )
+
         return CancelCommandResponse(
-            message="Command cancelled.",
+            message="Command cancellation acknowledged by all runners.",
             command_id=command_id,
         )
 
@@ -799,6 +826,7 @@ class API:
                     )
 
         except anyio.get_cancelled_exc_class():
+            self._cancelled_commands.add(command_id)
             command = TaskCancelled(cancelled_command_id=command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
@@ -806,9 +834,13 @@ class API:
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
+            was_cancelled = command_id in self._cancelled_commands
+            if not was_cancelled:
+                await self._send(TaskFinished(finished_command_id=command_id))
             if command_id in self._text_generation_queues:
                 del self._text_generation_queues[command_id]
+            if was_cancelled:
+                self._cancelled_commands.discard(command_id)
 
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
@@ -1219,6 +1251,7 @@ class API:
                         del image_metadata[key]
 
         except anyio.get_cancelled_exc_class():
+            self._cancelled_commands.add(command_id)
             command = TaskCancelled(cancelled_command_id=command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
@@ -1226,9 +1259,13 @@ class API:
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
+            was_cancelled = command_id in self._cancelled_commands
+            if not was_cancelled:
+                await self._send(TaskFinished(finished_command_id=command_id))
             if command_id in self._image_generation_queues:
                 del self._image_generation_queues[command_id]
+            if was_cancelled:
+                self._cancelled_commands.discard(command_id)
 
     async def _collect_image_chunks(
         self,
@@ -1305,6 +1342,7 @@ class API:
 
             return (images, stats if capture_stats else None)
         except anyio.get_cancelled_exc_class():
+            self._cancelled_commands.add(command_id)
             command = TaskCancelled(cancelled_command_id=command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
@@ -1312,9 +1350,13 @@ class API:
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
+            was_cancelled = command_id in self._cancelled_commands
+            if not was_cancelled:
+                await self._send(TaskFinished(finished_command_id=command_id))
             if command_id in self._image_generation_queues:
                 del self._image_generation_queues[command_id]
+            if was_cancelled:
+                self._cancelled_commands.discard(command_id)
 
     async def _collect_image_generation(
         self,

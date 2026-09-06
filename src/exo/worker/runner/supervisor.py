@@ -195,6 +195,9 @@ class RunnerSupervisor:
     in_progress: dict[TaskId, Task] = field(default_factory=dict, init=False)
     completed: set[TaskId] = field(default_factory=set, init=False)
     cancelled: set[TaskId] = field(default_factory=set, init=False)
+    cancellation_acks: dict[TaskId, anyio.Event] = field(
+        default_factory=dict, init=False
+    )
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
@@ -298,12 +301,12 @@ class RunnerSupervisor:
             return
         await event.wait()
 
-    async def cancel_task(self, task_id: TaskId):
+    async def cancel_task(self, task_id: TaskId) -> bool:
         if task_id in self.completed:
             logger.info(f"Unable to cancel {task_id} as it has been completed")
             self.cancelled.add(task_id)
-            return
-        self.cancelled.add(task_id)
+            return True
+        acknowledgement = self.cancellation_acks.setdefault(task_id, anyio.Event())
         with anyio.move_on_after(0.5) as scope:
             try:
                 await self._cancel_sender.send_async(task_id)
@@ -312,9 +315,19 @@ class RunnerSupervisor:
                 logger.warning(
                     f"Cancelling task {task_id} failed, runner closed communication"
                 )
+                await self._check_runner(
+                    RuntimeError("cancel pipe closed before acknowledgement")
+                )
         if scope.cancel_called:
             logger.error("RunnerSupervisor cancel pipe blocked")
             await self._check_runner(TimeoutError("cancel pipe blocked"))
+        # Do not manufacture a timeout acknowledgement.  The API may stop
+        # waiting and report 504, but this worker task remains pending until
+        # the runner confirms release or the runner process exits (which also
+        # releases its resources and resolves the wait in _check_runner).
+        await acknowledgement.wait()
+        self.cancellation_acks.pop(task_id, None)
+        return True
 
     async def _forward_events(self):
         try:
@@ -346,6 +359,14 @@ class RunnerSupervisor:
                         )
                         self.in_progress.pop(event.task_id, None)
                         self.completed.add(event.task_id)
+                    if (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status == TaskStatus.Cancelled
+                    ):
+                        self.in_progress.pop(event.task_id, None)
+                        self.cancelled.add(event.task_id)
+                        if acknowledgement := self.cancellation_acks.get(event.task_id):
+                            acknowledgement.set()
                     await self._event_sender.send(event)
         except (ClosedResourceError, BrokenResourceError):
             # this is the happy path shutdown - we don't need to spam log with it
@@ -373,6 +394,10 @@ class RunnerSupervisor:
                 await self.runner_process.stop()
         rc = self.runner_process.exitcode
         logger.info(f"Runner exited with exit code {rc}")
+        for task_id, acknowledgement in self.cancellation_acks.items():
+            self.in_progress.pop(task_id, None)
+            self.cancelled.add(task_id)
+            acknowledgement.set()
 
         # If exit code is 0 then the transient errors were recoverable, meaning we don't need runner diagnostics
         if rc == 0:

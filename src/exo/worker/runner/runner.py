@@ -1,6 +1,6 @@
+import os
 import queue
 import threading
-import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -320,9 +320,13 @@ class Runner:
                     )
                 try:
                     import time as _t
+
                     import mlx.core as _mx
                     from mlx.utils import tree_flatten as _tf
-                    _rm = None if _skip_warmup else getattr(self.generator, "model", None)
+
+                    _rm = (
+                        None if _skip_warmup else getattr(self.generator, "model", None)
+                    )
                     if _rm is not None:
                         _t0 = _t.time()
                         _params = _tf(_rm.parameters())
@@ -408,10 +412,12 @@ class Runner:
             results = self.generator.step()
 
             finished: list[TaskId] = []
+            cancelled: list[TaskId] = []
             for task_id, result in results:
                 match result:
                     case CancelledResponse():
                         finished.append(task_id)
+                        cancelled.append(task_id)
                     case FinishedResponse():
                         self.send_task_status(task_id, TaskStatus.Complete)
                         finished.append(task_id)
@@ -420,6 +426,12 @@ class Runner:
 
             for task_id in finished:
                 self.active_tasks.pop(task_id, None)
+            # This is the runner's resource-release acknowledgement.  Emit it
+            # only after the generator has returned CancelledResponse and the
+            # task has left the active set; accepting a cancel-pipe write is
+            # not completion of cancellation.
+            for task_id in cancelled:
+                self.send_task_status(task_id, TaskStatus.Cancelled)
 
             try:
                 item = self._work_queue.get_nowait()

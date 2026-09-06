@@ -60,19 +60,21 @@ from exo.shared.types.events import (
 from exo.shared.types.instance_link import InstanceLink
 from exo.shared.types.state import State
 from exo.shared.types.tasks import (
+    CancelTask,
+    TaskId,
+    TaskStatus,
+)
+from exo.shared.types.tasks import (
     ImageEdits as ImageEditsTask,
 )
 from exo.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
 )
 from exo.shared.types.tasks import (
-    TaskId,
-    TaskStatus,
-)
-from exo.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from exo.shared.types.worker.instances import InstanceId
+from exo.shared.types.worker.runners import RunnerId
 from exo.utils.channels import Receiver, Sender
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.event_buffer import MultiSourceBuffer
@@ -146,6 +148,8 @@ class Master:
         self._event_log = DiskEventLog(EXO_EVENT_LOG_DIR / "master")
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
+        self._cancellation_expected: dict[TaskId, set[RunnerId]] = {}
+        self._cancellation_acked: dict[TaskId, set[RunnerId]] = {}
 
     async def run(self):
         logger.info("Starting Master")
@@ -406,12 +410,32 @@ class Master:
                                     command.cancelled_command_id
                                 )
                             ) is not None:
+                                task = self.state.tasks.get(task_id)
+                                instance = (
+                                    self.state.instances.get(task.instance_id)
+                                    if task is not None
+                                    else None
+                                )
+                                expected = set(
+                                    instance.shard_assignments.runner_to_shard
+                                    if instance is not None
+                                    else ()
+                                )
+                                self._cancellation_expected[task_id] = expected
+                                self._cancellation_acked.setdefault(task_id, set())
                                 generated_events.append(
                                     TaskStatusUpdated(
                                         task_status=TaskStatus.Cancelled,
                                         task_id=task_id,
                                     )
                                 )
+                                if not expected:
+                                    self.command_task_mapping.pop(
+                                        command.cancelled_command_id, None
+                                    )
+                                    generated_events.append(
+                                        TaskDeleted(task_id=task_id)
+                                    )
                             else:
                                 logger.warning(
                                     f"Nonexistent command {command.cancelled_command_id} cancelled"
@@ -521,10 +545,52 @@ class Master:
                         )
 
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))
+                    prior_task = (
+                        self.state.tasks.get(event.task_id)
+                        if isinstance(event, TaskStatusUpdated)
+                        else None
+                    )
                     self.state = apply(self.state, indexed)
 
                     self._event_log.append(event)
                     await self._send_indexed_event(indexed)
+                    if cancelled_task_id := self._record_cancellation_ack(
+                        prior_task, event
+                    ):
+                        await self.event_sender.send(
+                            TaskDeleted(task_id=cancelled_task_id)
+                        )
+
+    def _record_cancellation_ack(
+        self, prior_task: object, event: Event
+    ) -> TaskId | None:
+        """Return the original task only after every runner cancel task completes."""
+        if not (
+            isinstance(prior_task, CancelTask)
+            and isinstance(event, TaskStatusUpdated)
+            and event.task_status == TaskStatus.Complete
+        ):
+            return None
+        cancelled_task_id = prior_task.cancelled_task_id
+        self._cancellation_acked.setdefault(cancelled_task_id, set()).add(
+            prior_task.runner_id
+        )
+        expected = self._cancellation_expected.get(cancelled_task_id, set())
+        if not expected or not expected <= self._cancellation_acked[cancelled_task_id]:
+            return None
+        command_id = next(
+            (
+                command_id
+                for command_id, task_id in self.command_task_mapping.items()
+                if task_id == cancelled_task_id
+            ),
+            None,
+        )
+        if command_id is not None:
+            self.command_task_mapping.pop(command_id, None)
+        self._cancellation_expected.pop(cancelled_task_id, None)
+        self._cancellation_acked.pop(cancelled_task_id, None)
+        return cancelled_task_id
 
     # This function is re-entrant, take care!
     async def _send_indexed_event(self, event: IndexedEvent):

@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 from datetime import datetime, timezone
 from typing import Sequence
 
@@ -25,12 +26,13 @@ from exo.shared.types.events import (
     LocalForwarderEvent,
     NodeGatheredInfo,
     TaskCreated,
+    TaskStatusUpdated,
 )
 from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import (
     MemoryUsage,
 )
-from exo.shared.types.tasks import TaskStatus
+from exo.shared.types.tasks import CancelTask, TaskId, TaskStatus
 from exo.shared.types.tasks import TextGeneration as TextGenerationTask
 from exo.shared.types.text_generation import (
     InputMessage,
@@ -38,13 +40,46 @@ from exo.shared.types.text_generation import (
     TextGenerationTaskParams,
 )
 from exo.shared.types.worker.instances import (
+    InstanceId,
     InstanceMeta,
     MlxRingInstance,
     ShardAssignments,
 )
+from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import PipelineShardMetadata, Sharding
 from exo.utils.channels import channel
 from exo.utils.info_gatherer.info_gatherer import NodeBackends
+
+
+def test_cancelled_generation_is_deleted_only_after_every_runner_ack() -> None:
+    master = object.__new__(Master)
+    original = TaskId("generation")
+    command_id = CommandId("command")
+    runner_a = RunnerId("runner-a")
+    runner_b = RunnerId("runner-b")
+    master.command_task_mapping = {command_id: original}
+    master._cancellation_expected = {original: {runner_a, runner_b}}
+    master._cancellation_acked = {original: set()}
+    complete = TaskStatusUpdated(
+        task_id=TaskId("cancel"), task_status=TaskStatus.Complete
+    )
+
+    first = CancelTask(
+        instance_id=InstanceId("instance"),
+        cancelled_task_id=original,
+        runner_id=runner_a,
+    )
+    assert master._record_cancellation_ack(first, complete) is None
+    assert master.command_task_mapping == {command_id: original}
+
+    second = CancelTask(
+        instance_id=InstanceId("instance"),
+        cancelled_task_id=original,
+        runner_id=runner_b,
+    )
+    assert master._record_cancellation_ack(second, complete) == original
+    assert master.command_task_mapping == {}
+    assert original not in master._cancellation_expected
 
 
 @pytest.mark.asyncio
