@@ -235,6 +235,10 @@ class ChatCompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     stream: bool = False
     stream_options: StreamOptions | None = None
+    # Retain and reuse the longest exact token prefix across ordinary streamed
+    # chat turns. This must be opt-in because cold-cache benchmarks and
+    # unrelated prompts should not consume retained KV memory.
+    use_prefix_cache: bool = False
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
