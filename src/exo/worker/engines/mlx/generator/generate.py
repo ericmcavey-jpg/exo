@@ -4,7 +4,7 @@ import functools
 import math
 import time
 import uuid
-from typing import Callable, Generator, cast, get_args
+from typing import Callable, Generator, Sequence, cast, get_args
 
 import mlx.core as mx
 from mlx_lm.generate import (
@@ -170,6 +170,98 @@ def _has_pipeline_communication_layer(model: Model):
     return False
 
 
+def _pipeline_prefill_chunk_sizes(
+    total: int,
+    max_step: int,
+    min_step: int,
+    max_qk: int,
+    prefix_hit_length: int = 0,
+    step_tiers: Sequence[int] | None = None,
+) -> list[int]:
+    """Build a deterministic context-adaptive pipeline prefill schedule.
+
+    Long-context attention/indexer scratch scales with the query chunk ``Q``
+    times the resulting cache length ``K``.  A single fixed chunk therefore
+    either wastes early-context throughput or becomes unsafe late in prefill.
+    All ranks call this pure helper with identical inputs before entering the
+    pipeline, so varying chunk sizes does not change collective ordering.
+
+    ``prefix_hit_length`` is the already-materialized cache position at which
+    this suffix begins.  It must participate in the Q×K budget even though it
+    is not present in ``total``.  When ``step_tiers`` is supplied, the largest
+    configured tier that fits both the remaining suffix and Q×K budget is
+    selected.  Without tiers, ``max_qk == 0`` preserves the historical
+    fixed-size behavior; an active budget uses the historical halving policy.
+    """
+    if (
+        total < 1
+        or max_step < 1
+        or min_step < 1
+        or min_step > max_step
+        or prefix_hit_length < 0
+    ):
+        raise ValueError(
+            f"invalid adaptive prefill inputs: total={total}, max_step={max_step}, "
+            f"min_step={min_step}, prefix_hit_length={prefix_hit_length}"
+        )
+    remaining = total - 1
+    processed = 0
+    sizes: list[int] = []
+    tiers: tuple[int, ...] | None = None
+    if step_tiers is not None:
+        tiers = tuple(sorted(set(step_tiers), reverse=True))
+        if (
+            not tiers
+            or any(tier < min_step or tier > max_step for tier in tiers)
+            or tiers[-1] != min_step
+            or tiers[0] != max_step
+        ):
+            raise ValueError(
+                "adaptive prefill tiers must be unique positive steps within "
+                f"{min_step}..{max_step} and include both bounds: {tiers}"
+            )
+    while remaining:
+        if tiers is not None:
+            eligible_tiers = [tier for tier in tiers if tier <= remaining]
+            if max_qk > 0:
+                eligible_tiers = [
+                    tier
+                    for tier in eligible_tiers
+                    if tier * (prefix_hit_length + processed + tier) <= max_qk
+                ]
+            if eligible_tiers:
+                step = eligible_tiers[0]
+            else:
+                final_remainder = min(min_step, remaining)
+                resulting_cache_length = (
+                    prefix_hit_length + processed + final_remainder
+                )
+                if (
+                    max_qk > 0
+                    and final_remainder * resulting_cache_length > max_qk
+                ):
+                    raise ValueError(
+                        "no configured adaptive prefill tier satisfies max_qk: "
+                        f"prefix_hit_length={prefix_hit_length}, "
+                        f"processed={processed}, min_step={min_step}, "
+                        f"max_qk={max_qk}"
+                    )
+                step = final_remainder
+        else:
+            step = min(max_step, remaining)
+        if tiers is None and max_qk > 0:
+            while (
+                step > min_step
+                and step * (prefix_hit_length + processed + step) > max_qk
+            ):
+                step = max(min_step, step // 2)
+        step = min(step, remaining)
+        sizes.append(step)
+        processed += step
+        remaining -= step
+    return sizes
+
+
 def single_node_prefill(
     model: Model,
     prompt: mx.array,
@@ -254,6 +346,7 @@ def pipeline_parallel_prefill(
     prompt_progress_callback: Callable[[int, int], None],
     distributed_prompt_progress_callback: Callable[[], None] | None,
     group: mx.distributed.Group,
+    prefix_hit_length: int = 0,
 ) -> None:
     """Prefill the KV cache for pipeline parallel with overlapping stages.
 
@@ -276,6 +369,37 @@ def pipeline_parallel_prefill(
     side effects (given the same prefill step size)
     """
     prefill_step_size = prefill_step_size // min(4, group.size())
+    adaptive_max_qk = max(
+        0, int(os.environ.get("EXO_PIPELINE_PREFILL_MAX_QK", "0"))
+    )
+    adaptive_min_step = max(
+        1,
+        int(
+            os.environ.get(
+                "EXO_PIPELINE_PREFILL_MIN_EFFECTIVE_STEP",
+                str(prefill_step_size),
+            )
+        ),
+    )
+    if adaptive_min_step > prefill_step_size:
+        raise ValueError(
+            "EXO_PIPELINE_PREFILL_MIN_EFFECTIVE_STEP exceeds the effective "
+            f"maximum: {adaptive_min_step} > {prefill_step_size}"
+        )
+    configured_tiers = os.environ.get("EXO_PIPELINE_PREFILL_EFFECTIVE_STEPS")
+    adaptive_step_tiers: tuple[int, ...] | None = None
+    if configured_tiers:
+        try:
+            adaptive_step_tiers = tuple(
+                int(value.strip())
+                for value in configured_tiers.split(",")
+                if value.strip()
+            )
+        except ValueError as error:
+            raise ValueError(
+                "EXO_PIPELINE_PREFILL_EFFECTIVE_STEPS must be a comma-separated "
+                f"list of integers: {configured_tiers!r}"
+            ) from error
 
     quantize_cache_fn: Callable[..., None] = functools.partial(
         maybe_quantize_kv_cache,
@@ -290,12 +414,14 @@ def pipeline_parallel_prefill(
 
     # Build list of real prompt chunk sizes
     total = len(prompt)
-    real_chunk_sizes: list[int] = []
-    remaining = total - 1
-    while remaining:
-        n = min(prefill_step_size, remaining)
-        real_chunk_sizes.append(n)
-        remaining -= n
+    real_chunk_sizes = _pipeline_prefill_chunk_sizes(
+        total=total,
+        max_step=prefill_step_size,
+        min_step=adaptive_min_step,
+        max_qk=adaptive_max_qk,
+        prefix_hit_length=prefix_hit_length,
+        step_tiers=adaptive_step_tiers,
+    )
     n_real = len(real_chunk_sizes)
 
     # Each rank does: [rank leading dummies] [N real chunks] [world_size-1-rank trailing dummies]
@@ -308,6 +434,22 @@ def pipeline_parallel_prefill(
     logger.info(
         f"[R{rank}] Pipeline prefill: {n_real} real + {n_leading} leading + {n_trailing} trailing = {n_total} iterations"
     )
+    if adaptive_max_qk:
+        transitions: list[tuple[int, int]] = []
+        scheduled = 0
+        previous = None
+        for chunk_size in real_chunk_sizes:
+            if chunk_size != previous:
+                transitions.append((scheduled, chunk_size))
+                previous = chunk_size
+            scheduled += chunk_size
+        logger.info(
+            f"[R{rank}] Adaptive pipeline prefill: max_qk={adaptive_max_qk}, "
+            f"effective range={adaptive_min_step}..{prefill_step_size}, "
+            f"prefix_hit_length={prefix_hit_length}, "
+            f"tiers={adaptive_step_tiers}, "
+            f"transitions={transitions}"
+        )
     clear_prefill_sends()
 
     # Initial callback matching generate_step
@@ -384,6 +526,7 @@ def prefill(
     group: mx.distributed.Group | None,
     on_prefill_progress: Callable[[int, int], None] | None,
     distributed_prompt_progress_callback: Callable[[], None] | None,
+    prefix_hit_length: int = 0,
 ) -> tuple[float, int, list[CacheSnapshot]]:
     """Prefill the KV cache with prompt tokens.
 
@@ -480,6 +623,7 @@ def prefill(
                 prompt_progress_callback=progress_callback,
                 distributed_prompt_progress_callback=distributed_prompt_progress_callback,
                 group=group,
+                prefix_hit_length=prefix_hit_length,
             )
         elif num_tokens >= prefill_step_size:
             # SINGLE-NODE long prompt: stream_generate would chunk but never
@@ -821,6 +965,7 @@ def mlx_generate(
                 group,
                 on_prefill_progress,
                 distributed_prompt_progress_callback,
+                prefix_hit_length=prefix_hit_length,
             )
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 

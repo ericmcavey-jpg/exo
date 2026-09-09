@@ -127,11 +127,14 @@ class PipelineFirstLayer(CustomMlxLayer):
         original_layer: _LayerCallable,
         r: int,
         group: mx.distributed.Group,
+        shared_topk_width: int | None = None,
     ):
         super().__init__(original_layer)
         self.r: int = r
         self.group = group
         self.is_prefill: bool = False
+        self.shared_topk_width = shared_topk_width
+        self.original_layer_signature = signature(self.original_layer.__call__)
 
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array:
         if self.r != 0:
@@ -144,6 +147,28 @@ class PipelineFirstLayer(CustomMlxLayer):
             mx.eval(x)
             x = mx.distributed.recv_like(x, (self.r - 1), group=self.group, stream=mx.cpu)
             mx.eval(x)
+
+        if self.r != 0 and self.shared_topk_width is not None:
+            bound = self.original_layer_signature.bind_partial(x, *args, **kwargs)
+            cache = bound.arguments.get("cache", None)
+            if _topk_is_materialized(
+                x, cache=cache, index_topk=self.shared_topk_width
+            ):
+                topk_template = mx.zeros(
+                    (x.shape[0], 1, x.shape[1], self.shared_topk_width),
+                    dtype=mx.uint32,
+                )
+                prev_topk_indices = mx.distributed.recv_like(
+                    topk_template,
+                    (self.r - 1),
+                    group=self.group,
+                    stream=mx.cpu,  # pyright: ignore[reportArgumentType]
+                )
+                mx.eval(prev_topk_indices)
+                bound.arguments["prev_topk_indices"] = prev_topk_indices
+                original_layer = cast(Callable[..., mx.array], self.original_layer)
+                return original_layer(*bound.args, **bound.kwargs)
+
         return self.original_layer(x, *args, **kwargs)
 
 
@@ -154,6 +179,7 @@ class PipelineLastLayer(CustomMlxLayer):
         r: int,
         s: int,
         group: mx.distributed.Group,
+        send_shared_topk: bool = False,
     ):
         super().__init__(original_layer)
         self.r: int = r
@@ -162,6 +188,7 @@ class PipelineLastLayer(CustomMlxLayer):
         self.original_layer_signature = signature(self.original_layer.__call__)
         self.is_prefill: bool = False
         self.queue_sends: bool = False
+        self.send_shared_topk = send_shared_topk
 
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array:
         cache = self.original_layer_signature.bind_partial(
@@ -177,6 +204,7 @@ class PipelineLastLayer(CustomMlxLayer):
         if isinstance(output, tuple):
             _extra = output[1:]
             output = output[0]
+        shared_topk = _extra[0] if self.send_shared_topk and _extra else None
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
@@ -187,10 +215,24 @@ class PipelineLastLayer(CustomMlxLayer):
                 _pending_prefill_sends.append(
                     (output, (self.r + 1) % self.s, self.group)
                 )
+                if shared_topk is not None:
+                    mx.eval(shared_topk)
+                    _pending_prefill_sends.append(
+                        (shared_topk, (self.r + 1) % self.s, self.group)
+                    )
             else:
                 output = mx.distributed.send(
                     output, (self.r + 1) % self.s, group=self.group, stream=mx.cpu
                 )
+                if shared_topk is not None:
+                    mx.eval(shared_topk)
+                    sent_topk = mx.distributed.send(
+                        shared_topk,
+                        (self.r + 1) % self.s,
+                        group=self.group,
+                        stream=mx.cpu,  # pyright: ignore[reportArgumentType]
+                    )
+                    mx.eval(sent_topk)
             if cache is not None:
                 # CacheList (used by MLA models like DeepSeekV32, GLM MoE DSA)
                 # doesn't have .keys directly; access via first sub-cache.
@@ -207,7 +249,7 @@ class PipelineLastLayer(CustomMlxLayer):
             ]
             mx.eval(output)
 
-        return output if _extra is None else (output, *_extra)
+        return output if _extra is None else (output, *_extra)  # pyright: ignore[reportReturnType]
 
 
 def set_pipeline_prefill(model: nn.Module, is_prefill: bool) -> None:
@@ -257,6 +299,42 @@ def get_layers(inner_model_instance: nn.Module) -> list[_LayerCallable]:
         raise ValueError("Model must have either a 'layers' or 'h' attribute")
 
     return layers
+
+
+def _topk_is_materialized(
+    x: mx.array,
+    cache: object | None,
+    index_topk: int,
+) -> bool:
+    """Mirror the GLM DSA indexer's short-context ``None`` condition."""
+    cache_offset = 0
+    if cache is not None:
+        first_cache = (
+            cast(object, cache[0])  # type: ignore[index]
+            if hasattr(cache, "__getitem__")
+            else None
+        )
+        cache_offset = cast(int, getattr(first_cache, "offset", 0))
+    return cache_offset + int(x.shape[1]) > index_topk
+
+
+def _layer_uses_shared_topk(layer: _LayerCallable) -> bool:
+    attention = getattr(layer, "self_attn", None)
+    return bool(getattr(attention, "skip_topk", False))
+
+
+def _preceding_index_topk(
+    layers: list[_LayerCallable],
+    boundary: int,
+) -> int | None:
+    """Find the index width whose result is propagated into a shared layer."""
+    for layer in reversed(layers[:boundary]):
+        attention = getattr(layer, "self_attn", None)
+        indexer = getattr(attention, "indexer", None)
+        index_topk = getattr(indexer, "index_topk", None)
+        if index_topk is not None:
+            return int(index_topk)
+    return None
 
 
 def _patch_hybrid_cache(
@@ -309,6 +387,19 @@ def pipeline_auto_parallel(
     start_layer, end_layer = model_shard_meta.start_layer, model_shard_meta.end_layer
     device_rank, world_size = model_shard_meta.device_rank, model_shard_meta.world_size
 
+    receive_shared_topk_width: int | None = None
+    if start_layer > 0 and _layer_uses_shared_topk(layers[start_layer]):
+        receive_shared_topk_width = _preceding_index_topk(layers, start_layer)
+        if receive_shared_topk_width is None:
+            raise ValueError(
+                "pipeline shard starts on a shared-indexer layer without a "
+                "preceding full indexer"
+            )
+
+    send_shared_topk = end_layer < len(layers) and _layer_uses_shared_topk(
+        layers[end_layer]
+    )
+
     layers = layers[start_layer:end_layer]
     total = len(layers)
     for i, layer in enumerate(layers):
@@ -323,12 +414,18 @@ def pipeline_auto_parallel(
         mx.clear_cache()
         yield ModelLoadingResponse(layers_loaded=i, total=total)
 
-    layers[0] = PipelineFirstLayer(layers[0], device_rank, group=group)
+    layers[0] = PipelineFirstLayer(
+        layers[0],
+        device_rank,
+        group=group,
+        shared_topk_width=receive_shared_topk_width,
+    )
     layers[-1] = PipelineLastLayer(
         layers[-1],
         device_rank,
         world_size,
         group=group,
+        send_shared_topk=send_shared_topk,
     )
 
     if isinstance(inner_model_instance, GptOssMoeModel):

@@ -244,6 +244,7 @@ class ExoBatchGenerator:
                     self.group,
                     on_prefill_progress,
                     distributed_prompt_progress_callback,
+                    prefix_hit_length=prefix_hit_length,
                 )
 
         prefix_cache_hit: Literal["none", "partial", "exact"] = "none"
