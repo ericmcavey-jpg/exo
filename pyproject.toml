@@ -31,6 +31,7 @@ dependencies = [
 
 [project.scripts]
 exo = "exo.main:main"
+exo-likeness = "exo.likeness.cli:main"
 
 # dependencies only required for development
 [dependency-groups]

@@ -1,0 +1,486 @@
+"""exo-likeness: curate, pull, enhance and train on photos of yourself, without hoarding them.
+
+Typical flow (run on the Mac with the Photos library and exo):
+
+    exo-likeness people                                   # find your exact name in Photos
+    exo-likeness select --task me --person "Your Name"    # rank photos, nothing downloaded
+    exo-likeness pull --task me                           # download just the chosen originals
+    exo-likeness identity --task me                       # face reference for the identity check
+    exo-likeness enhance --recipe polish --identity-task me photo.jpg
+    exo-likeness train-prepare --task me --trigger-word ohwx --subject-class man
+    exo-likeness train-export --task me                   # after mflux-train finishes
+    exo-likeness release --task me                        # delete pulled photos + checkpoints
+"""
+
+import argparse
+import sys
+from collections import Counter
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import final
+
+from exo.likeness.enhance import EnhancementEffects, enhance_image
+from exo.likeness.exo_client import DEFAULT_EDIT_MODEL, ExoImageEditor
+from exo.likeness.identity import (
+    InsightFaceEmbedder,
+    ReferenceIdentityScorer,
+    build_reference,
+)
+from exo.likeness.models import IdentityReference, SelectionSettings, TaskManifest
+from exo.likeness.photo_library import (
+    PhotosLibraryUnavailableError,
+    find_candidates,
+    list_people,
+    open_library,
+    pull_originals,
+)
+from exo.likeness.recipes import RECIPES, EditStep, Recipe
+from exo.likeness.restoration import SeedVR2Restorer
+from exo.likeness.selection import select_photos
+from exo.likeness.training import export_latest_adapter, write_dataset
+from exo.likeness.workspace import (
+    TaskWorkspace,
+    default_likeness_home,
+    folder_size_bytes,
+    human_size,
+    list_workspaces,
+)
+
+
+@final
+class _Arguments(argparse.Namespace):
+    command: str
+    home: Path
+    library: Path | None
+    task: str
+    person: str
+    since: str | None
+    years: float
+    target: int
+    show: int
+    trigger_word: str
+    subject_class: str
+    quantize: int | None
+    recipe: str
+    images: list[Path]
+    from_task: str | None
+    identity_task: str | None
+    output_directory: Path | None
+    edit_model: str
+    exo_url: str
+    launch_model: bool
+    megapixels: float
+    final_short_edge: int | None
+    quality: str | None
+    seed: int
+    keep_intermediates: bool
+    seedvr2_model: str
+
+
+def _workspace(arguments: _Arguments, task_name: str | None = None) -> TaskWorkspace:
+    return TaskWorkspace(arguments.home, task_name or arguments.task)
+
+
+def _earliest_capture(arguments: _Arguments) -> datetime | None:
+    if arguments.since:
+        return datetime.fromisoformat(arguments.since).astimezone()
+    if arguments.years <= 0:
+        return None
+    return datetime.now().astimezone() - timedelta(days=365.25 * arguments.years)
+
+
+def command_people(arguments: _Arguments) -> None:
+    for name, count in list_people(open_library(arguments.library)):
+        print(f"{count:6d}  {name}")
+
+
+def command_select(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    settings = SelectionSettings(
+        person_name=arguments.person,
+        earliest_capture=_earliest_capture(arguments),
+        target_count=arguments.target,
+    )
+    candidates = find_candidates(open_library(arguments.library), arguments.person)
+    if not candidates:
+        print(
+            f"No photos tagged {arguments.person!r}. Check the exact name with "
+            "`exo-likeness people`, and tag yourself in Photos > People."
+        )
+        return
+    result = select_photos(candidates, settings)
+    workspace.save_manifest(
+        TaskManifest(
+            task_name=workspace.task_name,
+            created_at=datetime.now().astimezone(),
+            settings=settings,
+            selected=result.selected,
+        )
+    )
+
+    local_uuids = {
+        candidate.uuid for candidate in candidates if candidate.is_original_local
+    }
+    to_download = sum(1 for photo in result.selected if photo.uuid not in local_uuids)
+    framings = Counter(photo.framing for photo in result.selected)
+    angles = Counter(photo.head_angle for photo in result.selected)
+    print(f"Photos tagged {arguments.person!r}: {len(candidates)}")
+    print(f"Usable: {result.eligible_count}")
+    for reason, count in sorted(
+        result.rejection_counts.items(), key=lambda item: -item[1]
+    ):
+        print(f"  skipped {count:5d}  {reason}")
+    print(
+        f"Selected {len(result.selected)}: "
+        + ", ".join(f"{name} {count}" for name, count in framings.items())
+        + " | "
+        + ", ".join(f"{name} {count}" for name, count in angles.items())
+        + f" | favorites {sum(photo.is_favorite for photo in result.selected)}"
+    )
+    print(
+        f"Originals already on this Mac: {len(result.selected) - to_download}; to download from iCloud: {to_download}"
+    )
+    for photo in result.selected[: arguments.show]:
+        print(
+            f"  {photo.ranking_score:.3f}  {photo.captured_at:%Y-%m-%d}  "
+            f"{photo.framing:<8} {photo.head_angle:<19} {photo.uuid}"
+        )
+    print(f"Manifest: {workspace.manifest_path}")
+    print(f"Next: exo-likeness pull --task {workspace.task_name}")
+
+
+def command_pull(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    manifest = workspace.load_manifest()
+    already_pulled = {
+        uuid
+        for uuid, filename in manifest.pulled_files.items()
+        if (workspace.originals_directory / filename).exists()
+    }
+    wanted = [
+        photo.uuid for photo in manifest.selected if photo.uuid not in already_pulled
+    ]
+    pulled = {uuid: manifest.pulled_files[uuid] for uuid in already_pulled}
+    if wanted:
+        print(
+            f"Pulling {len(wanted)} originals (downloading from iCloud where needed)..."
+        )
+        for uuid, path in pull_originals(
+            wanted, workspace.originals_directory, arguments.library
+        ).items():
+            pulled[uuid] = path.name
+    workspace.save_manifest(manifest.model_copy(update={"pulled_files": pulled}))
+    missing = len(manifest.selected) - len(pulled)
+    print(
+        f"{len(pulled)} photos ready in {workspace.originals_directory} "
+        f"({human_size(folder_size_bytes(workspace.originals_directory))})"
+        + (f"; {missing} could not be exported" if missing else "")
+    )
+
+
+def command_identity(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    paths = workspace.pulled_paths()
+    if not paths:
+        raise SystemExit(
+            "No pulled photos. Run `exo-likeness pull` for this task first."
+        )
+    embedder = InsightFaceEmbedder()
+    embeddings: list[list[float]] = []
+    for path in paths:
+        embedding = embedder.embed_largest_face(path)
+        if embedding is not None:
+            embeddings.append(embedding)
+    reference, discarded = build_reference(embeddings)
+    workspace.save_identity(
+        IdentityReference(
+            embedder_name=embedder.name,
+            embedding=reference,
+            source_face_count=len(embeddings) - discarded,
+            discarded_face_count=discarded,
+            created_at=datetime.now().astimezone(),
+        )
+    )
+    print(
+        f"Identity reference built from {len(embeddings) - discarded} faces "
+        f"({discarded} discarded as not matching, {len(paths) - len(embeddings)} photos with no detectable face)."
+    )
+    print(
+        f"Saved to {workspace.identity_path}; it is kept when the photos are released."
+    )
+
+
+def command_train_prepare(arguments: _Arguments) -> None:
+    from exo.likeness.imaging import PillowImageOperations
+
+    workspace = _workspace(arguments)
+    config_path, image_count = write_dataset(
+        manifest=workspace.load_manifest(),
+        workspace=workspace,
+        trigger_word=arguments.trigger_word,
+        subject_class=arguments.subject_class,
+        writer=PillowImageOperations(),
+        quantize=arguments.quantize,
+    )
+    print(f"Dataset of {image_count} captioned images written next to {config_path}")
+    print("Train with (from exo's environment):")
+    print(f"  uv run mflux-train --config {config_path}")
+    print(f"Then: exo-likeness train-export --task {workspace.task_name}")
+
+
+def command_train_export(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    adapter = export_latest_adapter(workspace)
+    print(f"LoRA adapter: {adapter} ({human_size(adapter.stat().st_size)})")
+    print(
+        "Use it with: uv run mflux-generate-z-image-turbo --lora-paths "
+        f'{adapter} --prompt "a photo of {arguments.trigger_word or "<trigger>"} ..."'
+    )
+    print(
+        f"Free the photos and checkpoints with: exo-likeness release --task {workspace.task_name}"
+    )
+
+
+def command_release(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    freed = workspace.release()
+    print(
+        f"Freed {human_size(freed)} from {workspace.directory}. Kept: manifest, identity, "
+        "LoRA adapters and outputs. Re-pull the same photos any time with `exo-likeness pull`."
+    )
+
+
+def command_status(arguments: _Arguments) -> None:
+    workspaces = list_workspaces(arguments.home)
+    if not workspaces:
+        print(f"No tasks under {arguments.home}")
+        return
+    for workspace in workspaces:
+        usage = workspace.disk_usage()
+        details = ", ".join(
+            f"{name} {human_size(size)}" for name, size in usage.items()
+        )
+        print(
+            f"{workspace.task_name}: {human_size(sum(usage.values()))} ({details or 'empty'})"
+        )
+
+
+def command_recipes(_arguments: _Arguments) -> None:
+    for recipe in RECIPES.values():
+        print(f"{recipe.name:<12} {recipe.style:<10} {recipe.summary}")
+
+
+def _with_quality(recipe: Recipe, quality: str | None) -> Recipe:
+    if quality is None:
+        return recipe
+    return recipe.model_copy(
+        update={
+            "steps": [
+                step.model_copy(update={"quality": quality})
+                if isinstance(step, EditStep)
+                else step
+                for step in recipe.steps
+            ]
+        }
+    )
+
+
+def command_enhance(arguments: _Arguments) -> None:
+    from exo.likeness.imaging import PillowImageOperations
+
+    if arguments.recipe not in RECIPES:
+        raise SystemExit(
+            f"Unknown recipe {arguments.recipe!r}; see `exo-likeness recipes`."
+        )
+    recipe = _with_quality(RECIPES[arguments.recipe], arguments.quality)
+    inputs = (
+        _workspace(arguments, arguments.from_task).pulled_paths()
+        if arguments.from_task
+        else arguments.images
+    )
+    if not inputs:
+        raise SystemExit("No input images. Pass image paths or --from-task.")
+
+    identity = None
+    if arguments.identity_task:
+        reference = _workspace(arguments, arguments.identity_task).load_identity()
+        embedder = InsightFaceEmbedder()
+        if reference.embedder_name != embedder.name:
+            raise SystemExit(
+                f"The identity reference was built with {reference.embedder_name}; "
+                f"rebuild it with `exo-likeness identity --task {arguments.identity_task}`."
+            )
+        identity = ReferenceIdentityScorer(embedder, reference.embedding)
+    elif recipe.style == "realistic":
+        print(
+            "Note: no --identity-task given, so edits will not be checked against your face."
+        )
+
+    editor = ExoImageEditor(base_url=arguments.exo_url, model_id=arguments.edit_model)
+    if any(isinstance(step, EditStep) for step in recipe.steps):
+        editor.ensure_model_running(
+            launch_if_missing=arguments.launch_model,
+            ready_timeout_seconds=3600.0,
+            on_progress=print,
+        )
+    effects = EnhancementEffects(
+        editor=editor,
+        restorer=SeedVR2Restorer(
+            model="seedvr2-7b"
+            if arguments.seedvr2_model == "seedvr2-7b"
+            else "seedvr2-3b"
+        ),
+        images=PillowImageOperations(),
+        identity=identity,
+    )
+    output_root = arguments.output_directory or (
+        _workspace(arguments, arguments.identity_task).outputs_directory
+        if arguments.identity_task
+        else Path.cwd() / "likeness-outputs"
+    )
+    for source in inputs:
+        output_directory = output_root / f"{source.stem}-{recipe.name}"
+        print(f"Enhancing {source.name} with {recipe.name}...")
+        report = enhance_image(
+            source=source,
+            recipe=recipe,
+            output_directory=output_directory,
+            effects=effects,
+            base_seed=arguments.seed,
+            target_megapixels=arguments.megapixels,
+            final_short_edge=arguments.final_short_edge,
+            keep_intermediates=arguments.keep_intermediates,
+        )
+        rejected = sum(1 for step in report.steps if not step.accepted)
+        similarity = (
+            ""
+            if report.source_similarity is None or report.final_similarity is None
+            else f" | likeness {report.source_similarity:.2f} -> {report.final_similarity:.2f}"
+        )
+        print(
+            f"  {report.final_output}{similarity}"
+            + (
+                f" | {rejected} edit attempt(s) rejected for drifting"
+                if rejected
+                else ""
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="exo-likeness",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--home", type=Path, default=default_likeness_home())
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    def task_command(name: str, help_text: str) -> argparse.ArgumentParser:
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--task", required=True, help="Task name, e.g. 'me'")
+        return command
+
+    people = commands.add_parser("people", help="List named people in Photos")
+    people.add_argument("--library", type=Path, default=None)
+
+    select = task_command("select", "Rank photos of a person (no downloads)")
+    select.add_argument(
+        "--person", required=True, help="Name exactly as tagged in Photos"
+    )
+    select.add_argument(
+        "--since", default=None, help="Earliest capture date, YYYY-MM-DD"
+    )
+    select.add_argument(
+        "--years",
+        type=float,
+        default=3.0,
+        help="Default window when --since is not given (0 = all)",
+    )
+    select.add_argument("--target", type=int, default=60)
+    select.add_argument("--show", type=int, default=15)
+    select.add_argument("--library", type=Path, default=None)
+
+    pull = task_command("pull", "Download the selected originals")
+    pull.add_argument("--library", type=Path, default=None)
+
+    task_command("identity", "Build the face reference used by the identity check")
+
+    prepare = task_command("train-prepare", "Write an mflux LoRA dataset and config")
+    prepare.add_argument(
+        "--trigger-word", required=True, help="Rare token for you, e.g. 'ohwx'"
+    )
+    prepare.add_argument(
+        "--subject-class", default="person", help="e.g. man, woman, person"
+    )
+    prepare.add_argument("--quantize", type=int, choices=[4, 8], default=None)
+
+    export = task_command(
+        "train-export", "Copy the newest trained LoRA adapter into lora/"
+    )
+    export.add_argument("--trigger-word", default="")
+
+    task_command("release", "Delete pulled photos, datasets and checkpoints")
+    commands.add_parser("status", help="Disk use per task")
+    commands.add_parser("recipes", help="List enhancement recipes")
+
+    enhance = commands.add_parser("enhance", help="Enhance photos with a recipe")
+    enhance.add_argument("images", nargs="*", type=Path)
+    enhance.add_argument("--recipe", required=True, choices=sorted(RECIPES))
+    enhance.add_argument(
+        "--from-task", default=None, help="Enhance a task's pulled photos"
+    )
+    enhance.add_argument(
+        "--identity-task",
+        default=None,
+        help="Task whose identity reference guards realistic edits",
+    )
+    enhance.add_argument(
+        "--output-dir", dest="output_directory", type=Path, default=None
+    )
+    enhance.add_argument("--edit-model", default=DEFAULT_EDIT_MODEL)
+    enhance.add_argument("--exo-url", default="http://localhost:52415")
+    enhance.add_argument(
+        "--launch-model",
+        action="store_true",
+        help="Launch the edit model in exo if it is not running",
+    )
+    enhance.add_argument(
+        "--megapixels", type=float, default=1.0, help="Working size for edits"
+    )
+    enhance.add_argument(
+        "--final-short-edge",
+        type=int,
+        default=None,
+        help="Upscale target; 0 skips upscaling",
+    )
+    enhance.add_argument("--quality", choices=["low", "medium", "high"], default=None)
+    enhance.add_argument("--seed", type=int, default=7)
+    enhance.add_argument("--keep-intermediates", action="store_true")
+    enhance.add_argument(
+        "--seedvr2-model", choices=["seedvr2-3b", "seedvr2-7b"], default="seedvr2-3b"
+    )
+    return parser
+
+
+COMMANDS = {
+    "people": command_people,
+    "select": command_select,
+    "pull": command_pull,
+    "identity": command_identity,
+    "train-prepare": command_train_prepare,
+    "train-export": command_train_export,
+    "release": command_release,
+    "status": command_status,
+    "recipes": command_recipes,
+    "enhance": command_enhance,
+}
+
+
+def main() -> None:
+    arguments = build_parser().parse_args(namespace=_Arguments())
+    try:
+        COMMANDS[arguments.command](arguments)
+    except (PhotosLibraryUnavailableError, FileNotFoundError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

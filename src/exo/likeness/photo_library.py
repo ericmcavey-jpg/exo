@@ -1,0 +1,243 @@
+"""Read the Apple Photos library through osxphotos and pull originals on demand.
+
+osxphotos is not an exo dependency; run the toolkit with `uv run --with osxphotos`.
+Reading needs Full Disk Access for the terminal app. Queries use only the local
+Photos database, which holds faces, People names and Photos' aesthetic scores even
+when "Optimize Mac Storage" keeps the originals in iCloud. Originals are fetched
+only by `pull_originals`, for the photos a task selected.
+
+Every attribute read goes through the defensive helpers below so that an osxphotos
+release that renames a field degrades to "unknown" instead of crashing.
+"""
+
+import importlib
+import shutil
+import subprocess
+import sys
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from types import ModuleType
+from typing import Protocol, cast
+
+from exo.likeness.models import FaceMetrics, PhotoCandidate, PhotoUuid
+
+
+class PhotosLibraryUnavailableError(RuntimeError):
+    pass
+
+
+class _PhotosDatabase(Protocol):
+    def photos(
+        self, *, persons: list[str], images: bool, movies: bool
+    ) -> list[object]: ...
+
+
+class _PhotosDatabaseFactory(Protocol):
+    def __call__(self, dbfile: str | None = None) -> _PhotosDatabase: ...
+
+
+def _attribute(source: object, name: str) -> object:
+    value: object = getattr(source, name, None)
+    return value
+
+
+def _optional_float(source: object, name: str) -> float | None:
+    value = _attribute(source, name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _flag(source: object, name: str) -> bool:
+    return _attribute(source, name) is True
+
+
+def _optional_flag(source: object, name: str) -> bool | None:
+    value = _attribute(source, name)
+    return value if isinstance(value, bool) else None
+
+
+def _whole_number(source: object, name: str) -> int:
+    value = _attribute(source, name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0
+    return int(value)
+
+
+def _text_items(source: object, name: str) -> list[str]:
+    value = _attribute(source, name)
+    if not isinstance(value, list | tuple):
+        return []
+    items = cast(Sequence[object], value)
+    return [item for item in items if isinstance(item, str)]
+
+
+def _object_items(source: object, name: str) -> list[object]:
+    value = _attribute(source, name)
+    if not isinstance(value, list | tuple):
+        return []
+    return list(cast(Sequence[object], value))
+
+
+def _target_face(photo: object, person_name: str) -> FaceMetrics | None:
+    """The person's face in this photo; the largest one if Photos tagged several."""
+    faces = [
+        face
+        for face in _object_items(photo, "face_info")
+        if _attribute(face, "name") == person_name
+    ]
+    if not faces:
+        return None
+    face = max(faces, key=lambda item: _optional_float(item, "size") or 0.0)
+    quality = _optional_float(face, "quality")
+    return FaceMetrics(
+        # Photos stores -1 when it has not scored a face yet.
+        quality=None if quality is None or quality < 0 else quality,
+        relative_size=_optional_float(face, "size"),
+        yaw_radians=_optional_float(face, "yaw"),
+        eyes_closed=_flag(face, "left_eye_closed") or _flag(face, "right_eye_closed"),
+        smiling=_optional_flag(face, "has_smile"),
+    )
+
+
+def candidate_from_photo(photo: object, person_name: str) -> PhotoCandidate | None:
+    """Map one osxphotos PhotoInfo to a PhotoCandidate, or None if it lacks a uuid/date."""
+    uuid = _attribute(photo, "uuid")
+    captured_at = _attribute(photo, "date")
+    if not isinstance(uuid, str) or not isinstance(captured_at, datetime):
+        return None
+    score = _attribute(photo, "score")
+    return PhotoCandidate(
+        uuid=PhotoUuid(uuid),
+        # Normalize to an aware datetime so date-range comparisons never mix naive/aware.
+        captured_at=captured_at.astimezone(),
+        width=_whole_number(photo, "width"),
+        height=_whole_number(photo, "height"),
+        person_count=len(_text_items(photo, "persons")),
+        is_favorite=_flag(photo, "favorite"),
+        is_screenshot=_flag(photo, "screenshot"),
+        is_hidden=_flag(photo, "hidden"),
+        is_original_local=not _flag(photo, "ismissing"),
+        overall_score=_optional_float(score, "overall"),
+        sharpness_score=_optional_float(score, "sharply_focused_subject"),
+        lighting_score=_optional_float(score, "pleasant_lighting"),
+        composition_score=_optional_float(score, "well_framed_subject"),
+        face=_target_face(photo, person_name),
+    )
+
+
+def _load_osxphotos() -> ModuleType:
+    if sys.platform != "darwin":
+        raise PhotosLibraryUnavailableError(
+            "The Photos library can only be read on macOS."
+        )
+    try:
+        return importlib.import_module("osxphotos")
+    except ImportError as error:
+        raise PhotosLibraryUnavailableError(
+            "osxphotos is not installed. Run with: uv run --with osxphotos exo-likeness ..."
+        ) from error
+
+
+def open_library(library_path: Path | None) -> _PhotosDatabase:
+    """Open the Photos database (the system library unless a path is given)."""
+    module = _load_osxphotos()
+    factory = cast(_PhotosDatabaseFactory, module.PhotosDB)
+    try:
+        return factory(None if library_path is None else str(library_path))
+    except Exception as error:
+        raise PhotosLibraryUnavailableError(
+            "Could not open the Photos library. Give your terminal app Full Disk Access "
+            "(System Settings > Privacy & Security), then try again. "
+            f"Underlying error: {error}"
+        ) from error
+
+
+def list_people(database: _PhotosDatabase) -> list[tuple[str, int]]:
+    """Named people in Photos with their photo counts, most photographed first."""
+    counts = _attribute(database, "persons_as_dict")
+    if not isinstance(counts, dict):
+        return []
+    people = [
+        (name, count)
+        for name, count in cast(dict[object, object], counts).items()
+        if isinstance(name, str) and isinstance(count, int) and name != "_UNKNOWN_"
+    ]
+    return sorted(people, key=lambda person: person[1], reverse=True)
+
+
+def find_candidates(
+    database: _PhotosDatabase, person_name: str
+) -> list[PhotoCandidate]:
+    photos = database.photos(persons=[person_name], images=True, movies=False)
+    candidates = (candidate_from_photo(photo, person_name) for photo in photos)
+    return [candidate for candidate in candidates if candidate is not None]
+
+
+def _osxphotos_command() -> list[str]:
+    executable = shutil.which("osxphotos")
+    return [executable] if executable else [sys.executable, "-m", "osxphotos"]
+
+
+def build_pull_command(
+    uuid_list_file: Path, destination: Path, library_path: Path | None
+) -> list[str]:
+    command = [
+        *_osxphotos_command(),
+        "export",
+        str(destination),
+        "--uuid-from-file",
+        str(uuid_list_file),
+        "--download-missing",
+        "--use-photokit",
+        "--convert-to-jpeg",
+        "--jpeg-quality",
+        "0.95",
+        "--skip-live",
+        "--skip-raw",
+        "--filename",
+        "{uuid}",
+    ]
+    if library_path is not None:
+        command.extend(["--library", str(library_path)])
+    return command
+
+
+def match_pulled_files(
+    uuids: Sequence[PhotoUuid], exported: Sequence[Path]
+) -> dict[PhotoUuid, Path]:
+    """Pick one exported file per photo, preferring your own edit in Photos over the original."""
+    by_stem = {path.stem: path for path in exported}
+    matched: dict[PhotoUuid, Path] = {}
+    for uuid in uuids:
+        edited = by_stem.get(f"{uuid}_edited")
+        original = by_stem.get(uuid)
+        chosen = edited or original
+        if chosen is not None:
+            matched[uuid] = chosen
+    return matched
+
+
+def pull_originals(
+    uuids: Sequence[PhotoUuid], destination: Path, library_path: Path | None
+) -> dict[PhotoUuid, Path]:
+    """Export full-resolution copies, downloading from iCloud only the ones not on disk."""
+    _load_osxphotos()
+    destination.mkdir(parents=True, exist_ok=True)
+    uuid_list_file = destination / ".pull-uuids.txt"
+    uuid_list_file.write_text("\n".join(uuids) + "\n")
+    try:
+        subprocess.run(
+            build_pull_command(uuid_list_file, destination, library_path), check=True
+        )
+    finally:
+        uuid_list_file.unlink(missing_ok=True)
+
+    exported = [path for path in destination.iterdir() if path.is_file()]
+    matched = match_pulled_files(uuids, exported)
+    kept = set(matched.values())
+    for path in exported:
+        if path not in kept and path.stem.removesuffix("_edited") in uuids:
+            path.unlink()  # the unedited twin of a photo you edited in Photos
+    return matched
