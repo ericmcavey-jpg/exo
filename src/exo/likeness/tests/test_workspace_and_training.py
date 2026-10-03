@@ -164,6 +164,11 @@ def test_write_dataset_captions_pulled_photos(tmp_path: Path):
     assert (
         data / "001.txt"
     ).read_text() == "a close-up portrait photo of ohwx man, facing the camera"
+    unknown_angle = manifest.selected[0].model_copy(update={"head_angle": "unknown"})
+    assert (
+        caption_for(unknown_angle, "ohwx", "man")
+        == "a close-up portrait photo of ohwx man"
+    )
     assert json.loads(config_path.read_text())["data"] == str(data)
 
 

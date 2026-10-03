@@ -1,6 +1,6 @@
 """Read the Apple Photos library through osxphotos and pull originals on demand.
 
-osxphotos is not an exo dependency; run the toolkit with `uv run --with osxphotos`.
+osxphotos is not an exo dependency; scripts/likeness adds it for the commands that need it.
 Reading needs Full Disk Access for the terminal app. Queries use only the local
 Photos database, which holds faces, People names and Photos' aesthetic scores even
 when "Optimize Mac Storage" keeps the originals in iCloud. Originals are fetched
@@ -54,8 +54,13 @@ def _flag(source: object, name: str) -> bool:
 
 
 def _optional_flag(source: object, name: str) -> bool | None:
+    """Photos stores some flags as 0/1 integers rather than booleans."""
     value = _attribute(source, name)
-    return value if isinstance(value, bool) else None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    return None
 
 
 def _whole_number(source: object, name: str) -> int:
@@ -80,6 +85,20 @@ def _object_items(source: object, name: str) -> list[object]:
     return list(cast(Sequence[object], value))
 
 
+def _eyes_closed(face: object) -> bool:
+    """Closed-eye flags; osxphotos keeps them only in the raw face record.
+
+    Libraries from macOS Ventura onward leave these empty, so this is a no-op there.
+    """
+    raw_record = _attribute(face, "_info")
+    if not isinstance(raw_record, dict):
+        return False
+    record = cast(dict[object, object], raw_record)
+    return any(
+        record.get(key) in (True, 1) for key in ("left_eye_closed", "right_eye_closed")
+    )
+
+
 def _target_face(photo: object, person_name: str) -> FaceMetrics | None:
     """The person's face in this photo; the largest one if Photos tagged several."""
     faces = [
@@ -91,12 +110,15 @@ def _target_face(photo: object, person_name: str) -> FaceMetrics | None:
         return None
     face = max(faces, key=lambda item: _optional_float(item, "size") or 0.0)
     quality = _optional_float(face, "quality")
+    yaw = _optional_float(face, "yaw")
     return FaceMetrics(
         # Photos stores -1 when it has not scored a face yet.
         quality=None if quality is None or quality < 0 else quality,
         relative_size=_optional_float(face, "size"),
-        yaw_radians=_optional_float(face, "yaw"),
-        eyes_closed=_flag(face, "left_eye_closed") or _flag(face, "right_eye_closed"),
+        # osxphotos reports 0 when Photos has no head angle, which is always the
+        # case for libraries from macOS Ventura onward.
+        yaw_radians=None if yaw is None or yaw == 0 else yaw,
+        eyes_closed=_eyes_closed(face),
         smiling=_optional_flag(face, "has_smile"),
     )
 
@@ -136,7 +158,7 @@ def _load_osxphotos() -> ModuleType:
         return importlib.import_module("osxphotos")
     except ImportError as error:
         raise PhotosLibraryUnavailableError(
-            "osxphotos is not installed. Run with: uv run --with osxphotos exo-likeness ..."
+            "osxphotos is not installed. Run the toolkit through scripts/likeness, which adds it."
         ) from error
 
 

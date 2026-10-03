@@ -2,7 +2,7 @@
 
 mflux trains LoRAs for Z-Image and FLUX.2 (not FLUX.1 or Qwen-Image). The config
 below follows mflux's own Z-Image Turbo example; the trained adapter is used with
-`mflux-generate-z-image-turbo --lora-paths <adapter>`.
+`uvx --from mflux==0.17.5 mflux-generate-z-image-turbo --lora-paths <adapter>`.
 """
 
 import json
@@ -27,6 +27,7 @@ ANGLE_PHRASES: Final[dict[HeadAngle, str]] = {
     "three_quarter_left": "head turned slightly to the side",
     "three_quarter_right": "head turned slightly to the side",
     "profile": "seen in profile",
+    "unknown": "",
 }
 
 
@@ -37,10 +38,9 @@ class TrainingImageWriter(Protocol):
 
 
 def caption_for(photo: SelectedPhoto, trigger_word: str, subject_class: str) -> str:
-    return (
-        f"{FRAMING_PHRASES[photo.framing]} of {trigger_word} {subject_class}, "
-        f"{ANGLE_PHRASES[photo.head_angle]}"
-    )
+    caption = f"{FRAMING_PHRASES[photo.framing]} of {trigger_word} {subject_class}"
+    angle = ANGLE_PHRASES[photo.head_angle]
+    return f"{caption}, {angle}" if angle else caption
 
 
 def suggested_epochs(
@@ -141,7 +141,7 @@ def write_dataset(
         )
     if image_count == 0:
         raise FileNotFoundError(
-            "No pulled photos to train on. Run `exo-likeness pull` for this task first."
+            "No pulled photos to train on. Run `likeness pull` for this task first."
         )
     (data_directory / "preview_1.txt").write_text(
         f"a portrait photo of {trigger_word} {subject_class} smiling outdoors in soft daylight"
@@ -165,7 +165,7 @@ def export_latest_adapter(workspace: TaskWorkspace) -> Path:
     )
     if not checkpoints:
         raise FileNotFoundError(
-            "No training checkpoints found. Run the mflux-train command first."
+            "No training checkpoints found. Run `likeness train-run` first."
         )
     latest = checkpoints[-1]
     iteration = latest.name.split("_", 1)[0]

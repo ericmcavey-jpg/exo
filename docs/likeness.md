@@ -1,4 +1,4 @@
-# exo-likeness
+# likeness
 
 Curate photos of yourself from Apple Photos, enhance them realistically (or
 stylize them), and train a likeness LoRA, all locally on the Mac that runs exo.
@@ -12,14 +12,21 @@ afterwards, so the working set never piles up on disk.
    photos you like most as Favorites; they rank higher.
 2. **Grant Full Disk Access** to your terminal app (System Settings > Privacy &
    Security > Full Disk Access). osxphotos needs it to read the Photos database.
-3. **Run exo with image models enabled** (needed for edits):
-   `EXO_ENABLE_IMAGE_MODELS=true uv run exo`
-4. **Create an alias** that adds the optional tools for this toolkit only. It
-   does not change exo's own environment:
+3. **Get the toolkit** in its own folder, so the exo checkout you run day to day
+   stays on its current branch:
 
    ```bash
-   alias likeness='uv run --with osxphotos --with insightface --with onnxruntime exo-likeness'
+   git clone -b claude/busy-ramanujan-iomjoc https://github.com/ericmcavey-jpg/exo ~/exo-likeness
+   ln -s ~/exo-likeness/scripts/likeness /usr/local/bin/likeness   # optional: run `likeness` anywhere
    ```
+
+   Without the link, run it as `~/exo-likeness/scripts/likeness`. The script works
+   from any folder and adds only what each command needs (osxphotos, InsightFace,
+   Pillow, mflux) on top of the toolkit's environment. The first run sets that
+   environment up, which takes a few minutes. If `/usr/local/bin` does not exist,
+   create it first with `sudo mkdir -p /usr/local/bin`.
+4. **Run exo with image models enabled** (needed for `enhance`), from your usual
+   exo checkout: `EXO_ENABLE_IMAGE_MODELS=true uv run exo`
 
 First runs download model weights: InsightFace `buffalo_l` (about 300 MB) for
 the identity check, SeedVR2 3B for restoration, and Z-Image Turbo for training.
@@ -35,7 +42,7 @@ likeness identity --task me                       # face reference for the ident
 likeness enhance --recipe polish --identity-task me ~/Desktop/photo.jpg
 likeness enhance --recipe anime --from-task me    # stylize every pulled photo
 likeness train-prepare --task me --trigger-word ohwx --subject-class man
-uv run mflux-train --config ~/.exo/likeness/me/training/train.json
+likeness train-run --task me                      # mflux LoRA training
 likeness train-export --task me                   # keep just the LoRA adapter
 likeness release --task me                        # delete pulled photos and checkpoints
 likeness status                                   # disk use per task
@@ -46,13 +53,18 @@ likeness status                                   # disk use per task
 Ranking uses only the local Photos database, which keeps faces, People names and
 Photos' own aesthetic scores even when "Optimize Mac Storage" leaves originals in
 iCloud. It skips screenshots, hidden photos, photos with other people, low
-resolution, closed eyes and tiny faces, and by default only looks at the last
-3 years (`--since YYYY-MM-DD` or `--years N` to change).
+resolution and tiny faces, and by default only looks at the last 3 years
+(`--since YYYY-MM-DD` or `--years N` to change).
 
 From the rest it keeps up to `--target` photos (default 60), split across
-close-up, waist-up and full-body framings and cycling through head angles. It
-allows at most 4 per day and skips burst near-duplicates. The output says how
-many originals are already on the Mac and how many must come from iCloud.
+close-up, waist-up and full-body framings. It allows at most 4 per day and skips
+burst near-duplicates. The output says how many originals are already on the Mac
+and how many must come from iCloud.
+
+Libraries on macOS Ventura and later do not record head angle or closed eyes in
+a form osxphotos can read. Head angle then shows as `unknown` and the closed-eye
+filter has no effect, so glance through the pulled photos and favorite the good
+ones in Photos before re-running `select`.
 
 ### Storage (`pull` / `release`)
 
@@ -94,21 +106,24 @@ drifts. Stylized recipes only report the similarity. `report.json` in each outpu
 folder records every attempt. Pass `--keep-intermediates` to keep the
 step-by-step images.
 
-### Training (`train-prepare` / `train-export`)
+### Training (`train-prepare` / `train-run` / `train-export`)
 
 mflux trains LoRAs for Z-Image and FLUX.2, not FLUX.1 or Qwen-Image.
-`train-prepare` writes captioned images ("a close-up portrait photo of ohwx man,
-facing the camera") and a config based on mflux's Z-Image Turbo example, sized to
+`train-prepare` writes captioned images ("a close-up portrait photo of ohwx man")
+and a config based on mflux's Z-Image Turbo example, sized to
 about 2000 training steps. Pass `--quantize 8` to use less memory. After
-training, `train-export` copies the newest adapter to `lora/`. Use it with:
+training (`likeness train-run --task me`), `train-export` copies the newest
+adapter to `lora/`. Use it with:
 
 ```bash
-uv run mflux-generate-z-image-turbo --lora-paths ~/.exo/likeness/me/lora/me-<step>.safetensors \
+uvx --from mflux==0.17.5 mflux-generate-z-image-turbo \
+  --lora-paths ~/.exo/likeness/me/lora/me-<step>.safetensors \
   --prompt "a photo of ohwx man ..."
 ```
 
 ## Notes
 
-- The calls into osxphotos follow its documented API but have not yet been run
-  against a live library. Run `select` first and check its summary before `pull`.
+- The osxphotos calls were checked against osxphotos 0.77 but have not yet been
+  run against a live library. Run `select` first and check its summary before
+  `pull`.
 - Workspaces live in `~/.exo/likeness` (override with `EXO_LIKENESS_HOME`).

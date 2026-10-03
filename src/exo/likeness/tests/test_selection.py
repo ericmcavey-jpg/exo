@@ -79,6 +79,7 @@ def test_framing_and_angle_buckets():
     assert classify_head_angle(math.radians(-30)) == "three_quarter_left"
     assert classify_head_angle(math.radians(30)) == "three_quarter_right"
     assert classify_head_angle(math.radians(70)) == "profile"
+    assert classify_head_angle(None) == "unknown"
 
 
 def test_rejection_reasons():

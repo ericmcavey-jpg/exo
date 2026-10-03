@@ -1,15 +1,17 @@
-"""exo-likeness: curate, pull, enhance and train on photos of yourself, without hoarding them.
+"""likeness: curate, pull, enhance and train on photos of yourself, without hoarding them.
 
-Typical flow (run on the Mac with the Photos library and exo):
+Run it through scripts/likeness, which works from any folder and adds the optional
+packages each command needs. Typical flow, on the Mac with the Photos library and exo:
 
-    exo-likeness people                                   # find your exact name in Photos
-    exo-likeness select --task me --person "Your Name"    # rank photos, nothing downloaded
-    exo-likeness pull --task me                           # download just the chosen originals
-    exo-likeness identity --task me                       # face reference for the identity check
-    exo-likeness enhance --recipe polish --identity-task me photo.jpg
-    exo-likeness train-prepare --task me --trigger-word ohwx --subject-class man
-    exo-likeness train-export --task me                   # after mflux-train finishes
-    exo-likeness release --task me                        # delete pulled photos + checkpoints
+    likeness people                                   # find your exact name in Photos
+    likeness select --task me --person "Your Name"    # rank photos, nothing downloaded
+    likeness pull --task me                           # download just the chosen originals
+    likeness identity --task me                       # face reference for the identity check
+    likeness enhance --recipe polish --identity-task me photo.jpg
+    likeness train-prepare --task me --trigger-word ohwx --subject-class man
+    likeness train-run --task me                      # mflux LoRA training
+    likeness train-export --task me                   # keep just the LoRA adapter
+    likeness release --task me                        # delete pulled photos + checkpoints
 """
 
 import argparse
@@ -105,7 +107,7 @@ def command_select(arguments: _Arguments) -> None:
     if not candidates:
         print(
             f"No photos tagged {arguments.person!r}. Check the exact name with "
-            "`exo-likeness people`, and tag yourself in Photos > People."
+            "`likeness people`, and tag yourself in Photos > People."
         )
         return
     result = select_photos(candidates, settings)
@@ -146,7 +148,7 @@ def command_select(arguments: _Arguments) -> None:
             f"{photo.framing:<8} {photo.head_angle:<19} {photo.uuid}"
         )
     print(f"Manifest: {workspace.manifest_path}")
-    print(f"Next: exo-likeness pull --task {workspace.task_name}")
+    print(f"Next: likeness pull --task {workspace.task_name}")
 
 
 def command_pull(arguments: _Arguments) -> None:
@@ -182,9 +184,7 @@ def command_identity(arguments: _Arguments) -> None:
     workspace = _workspace(arguments)
     paths = workspace.pulled_paths()
     if not paths:
-        raise SystemExit(
-            "No pulled photos. Run `exo-likeness pull` for this task first."
-        )
+        raise SystemExit("No pulled photos. Run `likeness pull` for this task first.")
     embedder = InsightFaceEmbedder()
     embeddings: list[list[float]] = []
     for path in paths:
@@ -223,9 +223,8 @@ def command_train_prepare(arguments: _Arguments) -> None:
         quantize=arguments.quantize,
     )
     print(f"Dataset of {image_count} captioned images written next to {config_path}")
-    print("Train with (from exo's environment):")
-    print(f"  uv run mflux-train --config {config_path}")
-    print(f"Then: exo-likeness train-export --task {workspace.task_name}")
+    print(f"Train with: likeness train-run --task {workspace.task_name}")
+    print(f"Then: likeness train-export --task {workspace.task_name}")
 
 
 def command_train_export(arguments: _Arguments) -> None:
@@ -233,11 +232,11 @@ def command_train_export(arguments: _Arguments) -> None:
     adapter = export_latest_adapter(workspace)
     print(f"LoRA adapter: {adapter} ({human_size(adapter.stat().st_size)})")
     print(
-        "Use it with: uv run mflux-generate-z-image-turbo --lora-paths "
+        "Use it with: uvx --from mflux==0.17.5 mflux-generate-z-image-turbo --lora-paths "
         f'{adapter} --prompt "a photo of {arguments.trigger_word or "<trigger>"} ..."'
     )
     print(
-        f"Free the photos and checkpoints with: exo-likeness release --task {workspace.task_name}"
+        f"Free the photos and checkpoints with: likeness release --task {workspace.task_name}"
     )
 
 
@@ -246,7 +245,7 @@ def command_release(arguments: _Arguments) -> None:
     freed = workspace.release()
     print(
         f"Freed {human_size(freed)} from {workspace.directory}. Kept: manifest, identity, "
-        "LoRA adapters and outputs. Re-pull the same photos any time with `exo-likeness pull`."
+        "LoRA adapters and outputs. Re-pull the same photos any time with `likeness pull`."
     )
 
 
@@ -290,7 +289,7 @@ def command_enhance(arguments: _Arguments) -> None:
 
     if arguments.recipe not in RECIPES:
         raise SystemExit(
-            f"Unknown recipe {arguments.recipe!r}; see `exo-likeness recipes`."
+            f"Unknown recipe {arguments.recipe!r}; see `likeness recipes`."
         )
     recipe = _with_quality(RECIPES[arguments.recipe], arguments.quality)
     inputs = (
@@ -308,7 +307,7 @@ def command_enhance(arguments: _Arguments) -> None:
         if reference.embedder_name != embedder.name:
             raise SystemExit(
                 f"The identity reference was built with {reference.embedder_name}; "
-                f"rebuild it with `exo-likeness identity --task {arguments.identity_task}`."
+                f"rebuild it with `likeness identity --task {arguments.identity_task}`."
             )
         identity = ReferenceIdentityScorer(embedder, reference.embedding)
     elif recipe.style == "realistic":
@@ -369,7 +368,7 @@ def command_enhance(arguments: _Arguments) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="exo-likeness",
+        prog="likeness",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

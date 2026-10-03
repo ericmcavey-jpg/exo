@@ -59,6 +59,22 @@ def test_maps_osxphotos_fields_and_picks_the_persons_largest_face():
     assert candidate.face.smiling is None
 
 
+def test_reads_raw_eye_flags_integer_smiles_and_missing_head_angle():
+    face = SimpleNamespace(
+        name="Me",
+        size=0.3,
+        quality=0.6,
+        yaw=0,
+        has_smile=1,
+        _info={"left_eye_closed": 0, "right_eye_closed": 1},
+    )
+    candidate = candidate_from_photo(fake_photo(face_info=[face]), "Me")
+    assert candidate is not None and candidate.face is not None
+    assert candidate.face.eyes_closed
+    assert candidate.face.smiling is True
+    assert candidate.face.yaw_radians is None
+
+
 def test_missing_fields_degrade_instead_of_crashing():
     candidate = candidate_from_photo(
         fake_photo(score=None, face_info=None, width="wide", persons=None), "Me"

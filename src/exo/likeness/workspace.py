@@ -76,7 +76,7 @@ class TaskWorkspace:
     def load_manifest(self) -> TaskManifest:
         if not self.manifest_path.exists():
             raise FileNotFoundError(
-                f"No manifest for task {self.task_name!r}. Run `exo-likeness select` first."
+                f"No manifest for task {self.task_name!r}. Run `likeness select` first."
             )
         return TaskManifest.model_validate_json(self.manifest_path.read_text())
 
@@ -88,7 +88,7 @@ class TaskWorkspace:
         if not self.identity_path.exists():
             raise FileNotFoundError(
                 f"No identity reference for task {self.task_name!r}. "
-                "Run `exo-likeness identity` first."
+                "Run `likeness identity` first."
             )
         return IdentityReference.model_validate_json(self.identity_path.read_text())
 

@@ -10,7 +10,9 @@ from exo.utils.pydantic_ext import FrozenModel
 PhotoUuid = NewType("PhotoUuid", str)
 
 Framing = Literal["close_up", "medium", "wide"]
-HeadAngle = Literal["frontal", "three_quarter_left", "three_quarter_right", "profile"]
+HeadAngle = Literal[
+    "frontal", "three_quarter_left", "three_quarter_right", "profile", "unknown"
+]
 
 
 class FaceMetrics(FrozenModel):

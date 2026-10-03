@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# likeness: run the exo likeness toolkit from any folder (see docs/likeness.md).
+#
+# Adds only the optional packages each command needs, on top of this checkout's
+# environment, without changing exo's own dependencies:
+#   people, select, pull   -> osxphotos
+#   identity               -> insightface, onnxruntime, pillow
+#   enhance                -> insightface, onnxruntime, pillow, mflux (SeedVR2)
+#   train-prepare          -> pillow
+#   train-run              -> mflux (runs mflux-train on the task's train.json)
+#
+# Optional: ln -s "$PWD/scripts/likeness" /usr/local/bin/likeness
+set -euo pipefail
+
+MFLUX_VERSION="0.17.5"
+
+# Resolve this script's real location so a symlink in /usr/local/bin works.
+script_path="${BASH_SOURCE[0]}"
+while [ -L "$script_path" ]; do
+  link_target="$(readlink "$script_path")"
+  case "$link_target" in
+    /*) script_path="$link_target" ;;
+    *) script_path="$(dirname "$script_path")/$link_target" ;;
+  esac
+done
+repository="$(cd "$(dirname "$script_path")/.." && pwd)"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "likeness: uv is not installed. Install it with:" >&2
+  echo "  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  exit 1
+fi
+if [ ! -d "$repository/src/exo/likeness" ]; then
+  echo "likeness: $repository does not contain the likeness toolkit. Get it with:" >&2
+  echo "  git clone -b claude/busy-ramanujan-iomjoc https://github.com/ericmcavey-jpg/exo ~/exo-likeness" >&2
+  exit 1
+fi
+
+# The subcommand is the first argument that is not an option (or --home's value).
+command_name=""
+skip_next=""
+for argument in "$@"; do
+  if [ -n "$skip_next" ]; then
+    skip_next=""
+    continue
+  fi
+  case "$argument" in
+    --home) skip_next="yes" ;;
+    -*) ;;
+    *)
+      command_name="$argument"
+      break
+      ;;
+  esac
+done
+
+uv_run=(uv run --preview-features extra-build-dependencies --project "$repository")
+photos_packages=(--with osxphotos)
+face_packages=(--with insightface --with onnxruntime --with pillow)
+mflux_packages=(--with "mflux==$MFLUX_VERSION")
+
+case "$command_name" in
+  people | select | pull) extra_packages=("${photos_packages[@]}") ;;
+  identity) extra_packages=("${face_packages[@]}") ;;
+  enhance) extra_packages=("${face_packages[@]}" "${mflux_packages[@]}") ;;
+  train-prepare) extra_packages=(--with pillow) ;;
+  train-run)
+    shift
+    task=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --task)
+          task="${2:-}"
+          shift 2 || shift
+          ;;
+        --task=*)
+          task="${1#--task=}"
+          shift
+          ;;
+        *)
+          echo "likeness train-run: unexpected argument '$1'" >&2
+          exit 2
+          ;;
+      esac
+    done
+    if [ -z "$task" ]; then
+      echo "usage: likeness train-run --task NAME" >&2
+      exit 2
+    fi
+    config="${EXO_LIKENESS_HOME:-$HOME/.exo/likeness}/$task/training/train.json"
+    if [ ! -f "$config" ]; then
+      echo "likeness: $config not found. Run 'likeness train-prepare --task $task ...' first." >&2
+      exit 1
+    fi
+    exec "${uv_run[@]}" "${mflux_packages[@]}" mflux-train --config "$config"
+    ;;
+  *) extra_packages=() ;;
+esac
+
+# "${array[@]+...}" keeps an empty array safe under `set -u` in macOS's bash 3.2.
+exec "${uv_run[@]}" ${extra_packages[@]+"${extra_packages[@]}"} exo-likeness "$@"

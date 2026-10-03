@@ -67,8 +67,8 @@ class SeedVR2Restorer:
     ) -> Path:
         if importlib.util.find_spec("mflux") is None:
             raise RuntimeError(
-                "mflux is not installed in this environment. Run exo-likeness from exo's "
-                "environment on the Mac (the one that serves image models)."
+                "mflux is not installed in this environment. Run the toolkit through "
+                "scripts/likeness, which adds it."
             )
         subprocess.run(
             self.command(

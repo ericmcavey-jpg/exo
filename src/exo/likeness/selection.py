@@ -29,6 +29,7 @@ HEAD_ANGLES: Final[tuple[HeadAngle, ...]] = (
     "three_quarter_left",
     "three_quarter_right",
     "profile",
+    "unknown",
 )
 
 
@@ -51,7 +52,9 @@ def classify_framing(relative_face_size: float | None) -> Framing:
 
 
 def classify_head_angle(yaw_radians: float | None) -> HeadAngle:
-    if yaw_radians is None or abs(yaw_radians) <= FRONTAL_MAXIMUM_YAW_RADIANS:
+    if yaw_radians is None:
+        return "unknown"
+    if abs(yaw_radians) <= FRONTAL_MAXIMUM_YAW_RADIANS:
         return "frontal"
     if abs(yaw_radians) > THREE_QUARTER_MAXIMUM_YAW_RADIANS:
         return "profile"

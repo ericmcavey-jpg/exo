@@ -5,7 +5,7 @@ similarity, with an averaged reference built from your own photos. The gate in
 `judge_identity` turns "still looks like me" into a pass/fail rule per edit.
 
 The InsightFace embedder is optional and loaded lazily; run the toolkit with
-`uv run --with insightface --with onnxruntime`. Its pretrained models are licensed
+scripts/likeness adds it to the commands that need it. Its pretrained models are licensed
 for non-commercial use, which covers personal use of your own likeness.
 """
 
@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 REFERENCE_OUTLIER_THRESHOLD: Final = 0.35
+# Faces that fill the frame are missed by the detector unless the image is padded.
+DETECTION_PADDING: Final = 0.25
 
 
 class IdentityPolicy(FrozenModel):
@@ -193,8 +195,8 @@ class InsightFaceEmbedder:
                 module = importlib.import_module("insightface.app")
             except ImportError as error:
                 raise RuntimeError(
-                    "InsightFace is not installed. Run with: "
-                    "uv run --with insightface --with onnxruntime exo-likeness ..."
+                    "InsightFace is not installed. Run the toolkit through "
+                    "scripts/likeness, which adds it."
                 ) from error
             factory = cast(_FaceAnalyzerFactory, module.FaceAnalysis)
             analyzer = factory(
@@ -211,6 +213,8 @@ class InsightFaceEmbedder:
 
         with Image.open(image_path) as opened:
             upright = ImageOps.exif_transpose(opened).convert("RGB")
+        border = round(max(upright.size) * DETECTION_PADDING)
+        upright = ImageOps.expand(upright, border=border, fill=(0, 0, 0))
         # InsightFace expects OpenCV channel order (BGR).
         pixels = np.ascontiguousarray(np.asarray(upright, dtype=np.uint8)[:, :, ::-1])
         faces = self._load().get(pixels)
