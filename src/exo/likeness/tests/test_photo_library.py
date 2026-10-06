@@ -6,7 +6,9 @@ from exo.likeness.models import PhotoUuid
 from exo.likeness.photo_library import (
     build_pull_command,
     candidate_from_photo,
+    find_photo_libraries,
     match_pulled_files,
+    open_library_failure_message,
 )
 
 
@@ -108,3 +110,35 @@ def test_pull_command_downloads_only_listed_photos():
         Path("/w/uuids.txt"), Path("/w/originals"), None
     )
     assert "--download-missing" in system_library and "--library" not in system_library
+
+
+def test_finds_libraries_up_to_three_folders_deep(tmp_path: Path):
+    drive = tmp_path / "Drive"
+    expected = [
+        drive / "Photos Library.photoslibrary",
+        drive / "Backups" / "2024" / "Old.photoslibrary",
+    ]
+    for library in expected:
+        library.mkdir(parents=True)
+    (drive / "a" / "b" / "c" / "Too Deep.photoslibrary").mkdir(parents=True)
+    (drive / "not-a-library.photoslibrary").write_text("")
+    assert find_photo_libraries([drive, tmp_path / "missing"]) == sorted(expected)
+
+
+def test_failure_message_points_ssh_users_at_remote_full_disk_access():
+    message = open_library_failure_message(
+        library_path=None,
+        underlying_error="Could not get path to photo library database",
+        over_ssh=True,
+        libraries_found=[Path("/Volumes/Drive/Photos Library.photoslibrary")],
+    )
+    assert '--library "/Volumes/Drive/Photos Library.photoslibrary"' in message
+    assert "Allow full disk access for remote users" in message
+    local = open_library_failure_message(
+        library_path=Path("/x.photoslibrary"),
+        underlying_error="boom",
+        over_ssh=False,
+        libraries_found=[],
+    )
+    assert "No --library was given" not in local
+    assert "terminal app has Full Disk Access" in local

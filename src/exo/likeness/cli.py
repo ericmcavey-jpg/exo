@@ -3,6 +3,7 @@
 Run it through scripts/likeness, which works from any folder and adds the optional
 packages each command needs. Typical flow, on the Mac with the Photos library and exo:
 
+    likeness libraries                                # Photos libraries here and on drives
     likeness people                                   # find your exact name in Photos
     likeness select --task me --person "Your Name"    # rank photos, nothing downloaded
     likeness pull --task me                           # download just the chosen originals
@@ -15,6 +16,7 @@ packages each command needs. Typical flow, on the Mac with the Photos library an
 """
 
 import argparse
+import os
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
@@ -31,7 +33,9 @@ from exo.likeness.identity import (
 from exo.likeness.models import IdentityReference, SelectionSettings, TaskManifest
 from exo.likeness.photo_library import (
     PhotosLibraryUnavailableError,
+    default_library_search_roots,
     find_candidates,
+    find_photo_libraries,
     list_people,
     open_library,
     pull_originals,
@@ -89,6 +93,33 @@ def _earliest_capture(arguments: _Arguments) -> datetime | None:
     if arguments.years <= 0:
         return None
     return datetime.now().astimezone() - timedelta(days=365.25 * arguments.years)
+
+
+def command_libraries(_arguments: _Arguments) -> None:
+    roots = default_library_search_roots()
+    drives = [root for root in roots if root.parent == Path("/Volumes")]
+    print("Mounted drives: " + (", ".join(drive.name for drive in drives) or "none"))
+    libraries = find_photo_libraries(roots)
+    if not libraries:
+        print(
+            "No Photos libraries found. If yours is on an external drive that is not "
+            "listed above, mount it (diskutil list external, then diskutil mountDisk diskN)."
+        )
+        if "SSH_CONNECTION" in os.environ:
+            print(
+                "Over SSH, macOS hides drive contents unless System Settings > General > "
+                'Sharing > Remote Login (i) > "Allow full disk access for remote users" is on.'
+            )
+        return
+    for library in libraries:
+        database = library / "database" / "Photos.sqlite"
+        updated = (
+            f"last updated {datetime.fromtimestamp(database.stat().st_mtime):%Y-%m-%d}"
+            if database.exists()
+            else "no database found inside"
+        )
+        print(f'  "{library}"  ({updated})')
+    print('Use one with: likeness people --library "<path>"')
 
 
 def command_people(arguments: _Arguments) -> None:
@@ -398,6 +429,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--task", required=True, help="Task name, e.g. 'me'")
         return command
 
+    commands.add_parser(
+        "libraries", help="Find Photos libraries on this Mac and mounted drives"
+    )
     people = commands.add_parser("people", help="List named people in Photos")
     people.add_argument("--library", type=Path, default=None)
 
@@ -481,6 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {
+    "libraries": command_libraries,
     "people": command_people,
     "select": command_select,
     "pull": command_pull,

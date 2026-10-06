@@ -35,6 +35,7 @@ InsightFace's pretrained models are licensed for non-commercial use.
 ## Workflow
 
 ```bash
+likeness libraries                                # Photos libraries here and on drives
 likeness people                                   # your exact name as tagged in Photos
 likeness select --task me --person "Your Name"    # rank photos; downloads nothing
 likeness pull --task me                           # download only the chosen originals
@@ -76,11 +77,18 @@ osxphotos only reads the library. Do not open an older library in Photos just
 for this: Photos would upgrade it in place.
 
 ```bash
-ls /Volumes
-diskutil list external
-find /Volumes -maxdepth 4 -name "*.photoslibrary" -type d 2>/dev/null
+likeness libraries
 likeness people --library "/Volumes/DRIVE/Photos Library.photoslibrary"
 ```
+
+`libraries` lists mounted drives and every Photos library it finds in
+`~/Pictures` and up to three folders deep on each drive, with the date each was
+last updated. If the drive is missing, mount it with `diskutil list external`
+and then `diskutil mountDisk diskN`.
+
+**Over SSH**, the Terminal app's Full Disk Access does not apply. On the Mac
+itself, open System Settings > General > Sharing, click (i) next to Remote
+Login, and turn on "Allow full disk access for remote users".
 
 ### Storage (`pull` / `release`)
 

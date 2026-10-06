@@ -11,6 +11,7 @@ release that renames a field degrades to "unknown" instead of crashing.
 """
 
 import importlib
+import os
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from exo.likeness.models import FaceMetrics, PhotoCandidate, PhotoUuid
 
@@ -162,17 +163,92 @@ def _load_osxphotos() -> ModuleType:
         ) from error
 
 
+LIBRARY_SEARCH_PATTERNS: Final = (
+    "*.photoslibrary",
+    "*/*.photoslibrary",
+    "*/*/*.photoslibrary",
+)
+
+
+def find_photo_libraries(search_roots: Sequence[Path]) -> list[Path]:
+    """Photos libraries up to three folders deep under each root (e.g. each drive)."""
+    found: set[Path] = set()
+    for root in search_roots:
+        for pattern in LIBRARY_SEARCH_PATTERNS:
+            try:
+                found.update(path for path in root.glob(pattern) if path.is_dir())
+            except OSError:
+                continue
+    return sorted(found)
+
+
+def default_library_search_roots() -> list[Path]:
+    volumes = Path("/Volumes")
+    drives = (
+        sorted(path for path in volumes.iterdir() if path.is_dir())
+        if volumes.is_dir()
+        else []
+    )
+    return [Path.home() / "Pictures", *drives]
+
+
+def open_library_failure_message(
+    *,
+    library_path: Path | None,
+    underlying_error: str,
+    over_ssh: bool,
+    libraries_found: Sequence[Path],
+) -> str:
+    lines = [f"Could not open the Photos library ({underlying_error})."]
+    if library_path is None:
+        lines.append(
+            "No --library was given, and osxphotos could not tell which library Photos "
+            "uses on this Mac (Photos may never have been opened here)."
+        )
+        if libraries_found:
+            lines.append("Photos libraries found; pass one with --library:")
+            lines.extend(f'  --library "{path}"' for path in libraries_found)
+        else:
+            lines.append(
+                "No Photos libraries were found in ~/Pictures or on mounted drives. "
+                "If yours is on an external drive, check it is mounted: ls /Volumes"
+            )
+    if over_ssh:
+        lines.append(
+            "You are connected over SSH, where the Terminal app's Full Disk Access does "
+            "not apply. On the Mac itself, open System Settings > General > Sharing, "
+            "click (i) next to Remote Login, and turn on "
+            '"Allow full disk access for remote users".'
+        )
+    else:
+        lines.append(
+            "Also check that your terminal app has Full Disk Access "
+            "(System Settings > Privacy & Security > Full Disk Access)."
+        )
+    return "\n".join(lines)
+
+
 def open_library(library_path: Path | None) -> _PhotosDatabase:
     """Open the Photos database (the system library unless a path is given)."""
     module = _load_osxphotos()
     factory = cast(_PhotosDatabaseFactory, module.PhotosDB)
+    if library_path is not None:
+        library_path = library_path.expanduser()
+    if library_path is not None and not library_path.exists():
+        raise PhotosLibraryUnavailableError(
+            f"{library_path} does not exist. If it is on an external drive, check the "
+            "drive is mounted (ls /Volumes)."
+        )
     try:
         return factory(None if library_path is None else str(library_path))
     except Exception as error:
         raise PhotosLibraryUnavailableError(
-            "Could not open the Photos library. Give your terminal app Full Disk Access "
-            "(System Settings > Privacy & Security), then try again. "
-            f"Underlying error: {error}"
+            open_library_failure_message(
+                library_path=library_path,
+                underlying_error=str(error),
+                over_ssh="SSH_CONNECTION" in os.environ,
+                libraries_found=find_photo_libraries(default_library_search_roots()),
+            )
         ) from error
 
 
