@@ -171,21 +171,35 @@ LIBRARY_SEARCH_PATTERNS: Final = (
 
 
 def find_photo_libraries(search_roots: Sequence[Path]) -> list[Path]:
-    """Photos libraries up to three folders deep under each root (e.g. each drive)."""
-    found: set[Path] = set()
+    """Photos libraries up to three folders deep under each root (e.g. each drive).
+
+    The same library reached through a link (for example /Volumes/Macintosh HD,
+    which points back at the startup disk) is listed once, by its shortest path.
+    """
+    found: dict[Path, Path] = {}
     for root in search_roots:
         for pattern in LIBRARY_SEARCH_PATTERNS:
             try:
-                found.update(path for path in root.glob(pattern) if path.is_dir())
+                matches = [path for path in root.glob(pattern) if path.is_dir()]
             except OSError:
                 continue
-    return sorted(found)
+            for path in matches:
+                real_path = path.resolve()
+                known = found.get(real_path)
+                if known is None or len(str(path)) < len(str(known)):
+                    found[real_path] = path
+    return sorted(found.values())
 
 
 def default_library_search_roots() -> list[Path]:
+    """~/Pictures plus every mounted drive except the startup disk's /Volumes link."""
     volumes = Path("/Volumes")
     drives = (
-        sorted(path for path in volumes.iterdir() if path.is_dir())
+        sorted(
+            path
+            for path in volumes.iterdir()
+            if path.is_dir() and path.resolve() != Path("/")
+        )
         if volumes.is_dir()
         else []
     )

@@ -122,7 +122,11 @@ def test_finds_libraries_up_to_three_folders_deep(tmp_path: Path):
         library.mkdir(parents=True)
     (drive / "a" / "b" / "c" / "Too Deep.photoslibrary").mkdir(parents=True)
     (drive / "not-a-library.photoslibrary").write_text("")
-    assert find_photo_libraries([drive, tmp_path / "missing"]) == sorted(expected)
+    startup_disk_link = tmp_path / "Startup"
+    startup_disk_link.symlink_to(tmp_path)
+    assert find_photo_libraries(
+        [drive, startup_disk_link, tmp_path / "missing"]
+    ) == sorted(expected)
 
 
 def test_failure_message_points_ssh_users_at_remote_full_disk_access():
