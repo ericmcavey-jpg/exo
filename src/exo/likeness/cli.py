@@ -145,12 +145,25 @@ def command_select(arguments: _Arguments) -> None:
         )
         return
     result = select_photos(candidates, settings)
+    # Keep photos already pulled for this task so re-selecting does not copy them again.
+    previously_pulled = (
+        workspace.load_manifest().pulled_files
+        if workspace.manifest_path.exists()
+        else {}
+    )
+    selected_uuids = {photo.uuid for photo in result.selected}
     workspace.save_manifest(
         TaskManifest(
             task_name=workspace.task_name,
             created_at=datetime.now().astimezone(),
             settings=settings,
             selected=result.selected,
+            pulled_files={
+                uuid: filename
+                for uuid, filename in previously_pulled.items()
+                if uuid in selected_uuids
+                and (workspace.originals_directory / filename).exists()
+            },
         )
     )
 

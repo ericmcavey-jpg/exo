@@ -124,6 +124,15 @@ def _target_face(photo: object, person_name: str) -> FaceMetrics | None:
     )
 
 
+def _largest_other_face_size(photo: object, person_name: str) -> float | None:
+    sizes = [
+        _optional_float(face, "size") or 0.0
+        for face in _object_items(photo, "face_info")
+        if _attribute(face, "name") != person_name
+    ]
+    return max(sizes) if sizes else None
+
+
 def candidate_from_photo(photo: object, person_name: str) -> PhotoCandidate | None:
     """Map one osxphotos PhotoInfo to a PhotoCandidate, or None if it lacks a uuid/date."""
     uuid = _attribute(photo, "uuid")
@@ -138,6 +147,7 @@ def candidate_from_photo(photo: object, person_name: str) -> PhotoCandidate | No
         width=_whole_number(photo, "width"),
         height=_whole_number(photo, "height"),
         person_count=len(_text_items(photo, "persons")),
+        largest_other_face_size=_largest_other_face_size(photo, person_name),
         is_favorite=_flag(photo, "favorite"),
         is_screenshot=_flag(photo, "screenshot"),
         is_hidden=_flag(photo, "hidden"),
@@ -315,6 +325,7 @@ def build_pull_command(
             "--skip-raw",
             "--filename",
             "{uuid}",
+            "--update",
         ]
     )
     if library_path is not None:

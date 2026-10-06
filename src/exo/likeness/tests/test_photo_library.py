@@ -59,6 +59,7 @@ def test_maps_osxphotos_fields_and_picks_the_persons_largest_face():
     assert candidate.face.relative_size == 0.3
     assert candidate.face.quality is None  # Photos' "not scored yet" marker
     assert candidate.face.smiling is None
+    assert candidate.largest_other_face_size == 0.5
 
 
 def test_reads_raw_eye_flags_integer_smiles_and_missing_head_angle():
@@ -106,6 +107,7 @@ def test_pull_command_downloads_only_listed_photos():
     assert command[-2:] == ["--library", "/lib.photoslibrary"]
     # iCloud downloads only work for the library Photos itself is using.
     assert "--download-missing" not in command
+    assert "--update" in command  # re-running pull skips photos already copied
     system_library = build_pull_command(
         Path("/w/uuids.txt"), Path("/w/originals"), None
     )

@@ -61,6 +61,19 @@ def classify_head_angle(yaw_radians: float | None) -> HeadAngle:
     return "three_quarter_left" if yaw_radians < 0 else "three_quarter_right"
 
 
+def _others_are_background(
+    candidate: PhotoCandidate, settings: SelectionSettings
+) -> bool:
+    """True when nobody else is in the photo, or everyone else is far smaller than you."""
+    other_size = candidate.largest_other_face_size
+    if other_size is None:
+        return candidate.person_count <= 1
+    own_size = None if candidate.face is None else candidate.face.relative_size
+    if own_size is None:
+        return False
+    return other_size < settings.maximum_other_face_ratio * own_size
+
+
 def rejection_reason(
     candidate: PhotoCandidate, settings: SelectionSettings
 ) -> str | None:
@@ -69,7 +82,7 @@ def rejection_reason(
         return "screenshot"
     if candidate.is_hidden:
         return "hidden in Photos"
-    if candidate.person_count != 1:
+    if not _others_are_background(candidate, settings):
         return "other people in the photo"
     if (
         settings.earliest_capture is not None

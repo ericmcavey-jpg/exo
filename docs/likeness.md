@@ -53,9 +53,11 @@ likeness status                                   # disk use per task
 
 Ranking uses only the local Photos database, which keeps faces, People names and
 Photos' own aesthetic scores even when "Optimize Mac Storage" leaves originals in
-iCloud. It skips screenshots, hidden photos, photos with other people, low
-resolution and tiny faces, and by default only looks at the last 3 years
-(`--since YYYY-MM-DD` or `--years N` to change).
+iCloud. It skips screenshots, hidden photos, low resolution, tiny faces, and
+photos where someone else's face is at least half the size of yours (people in
+the background are fine). By default it only looks at the last 3 years
+(`--since YYYY-MM-DD` or `--years N` to change). Re-running `select` keeps any
+photos already pulled for the task, and `pull` only copies what is new.
 
 From the rest it keeps up to `--target` photos (default 60), split across
 close-up, waist-up and full-body framings. It allows at most 4 per day and skips

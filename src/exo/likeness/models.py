@@ -33,6 +33,8 @@ class PhotoCandidate(FrozenModel):
     width: int
     height: int
     person_count: int
+    # Largest face of anyone else in the photo (None when no other face was detected).
+    largest_other_face_size: float | None
     is_favorite: bool
     is_screenshot: bool
     is_hidden: bool
@@ -54,6 +56,8 @@ class SelectionSettings(FrozenModel):
     minimum_face_size: float = 0.03
     minimum_seconds_between_picks: float = 90.0
     maximum_picks_per_day: int = 4
+    # Other faces smaller than this fraction of yours count as background people.
+    maximum_other_face_ratio: float = 0.5
     close_up_share: float = 0.40
     medium_share: float = 0.35
     wide_share: float = 0.25

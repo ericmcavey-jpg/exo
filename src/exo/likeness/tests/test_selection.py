@@ -27,6 +27,7 @@ def make_candidate(
     overall: float | None = 0.5,
     favorite: bool = False,
     person_count: int = 1,
+    largest_other_face_size: float | None = None,
     width: int = 3024,
     height: int = 4032,
     eyes_closed: bool = False,
@@ -39,6 +40,7 @@ def make_candidate(
         width=width,
         height=height,
         person_count=person_count,
+        largest_other_face_size=largest_other_face_size,
         is_favorite=favorite,
         is_screenshot=screenshot,
         is_hidden=False,
@@ -157,3 +159,13 @@ def test_shortfall_in_one_framing_is_filled_from_others():
     assert len(result.selected) == 8
     assert result.eligible_count == 10
     assert result.rejection_counts == {}
+
+
+def test_background_people_are_allowed_but_companions_are_not():
+    rules = settings()
+    background = make_candidate("a", person_count=3, largest_other_face_size=0.05)
+    companion = make_candidate("b", person_count=2, largest_other_face_size=0.20)
+    no_face_sizes = make_candidate("c", person_count=2)
+    assert rejection_reason(background, rules) is None
+    assert rejection_reason(companion, rules) == "other people in the photo"
+    assert rejection_reason(no_face_sizes, rules) == "other people in the photo"
