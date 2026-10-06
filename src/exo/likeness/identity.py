@@ -11,6 +11,7 @@ for non-commercial use, which covers personal use of your own likeness.
 
 import importlib
 import math
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, final
@@ -193,6 +194,10 @@ class InsightFaceEmbedder:
         if self._analyzer is None:
             try:
                 module = importlib.import_module("insightface.app")
+                # insightface calls a scikit-image API that is deprecated but still works.
+                warnings.filterwarnings(
+                    "ignore", category=FutureWarning, module=r"insightface\."
+                )
             except ImportError as error:
                 raise RuntimeError(
                     "InsightFace is not installed. Run the toolkit through "
