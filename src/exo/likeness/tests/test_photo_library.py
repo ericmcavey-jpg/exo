@@ -101,5 +101,10 @@ def test_pull_command_downloads_only_listed_photos():
         Path("/w/uuids.txt"), Path("/w/originals"), Path("/lib.photoslibrary")
     )
     assert command[command.index("--uuid-from-file") + 1] == "/w/uuids.txt"
-    assert "--download-missing" in command
     assert command[-2:] == ["--library", "/lib.photoslibrary"]
+    # iCloud downloads only work for the library Photos itself is using.
+    assert "--download-missing" not in command
+    system_library = build_pull_command(
+        Path("/w/uuids.txt"), Path("/w/originals"), None
+    )
+    assert "--download-missing" in system_library and "--library" not in system_library

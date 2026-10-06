@@ -66,6 +66,22 @@ a form osxphotos can read. Head angle then shows as `unknown` and the closed-eye
 filter has no effect, so glance through the pulled photos and favorite the good
 ones in Photos before re-running `select`.
 
+### A Photos library on another drive
+
+Pass `--library` to `people` and `select` to read a `.photoslibrary` on an
+external drive instead of the one Photos is using. `pull` reuses it from the
+manifest. Photos on that drive are copied as they are; the toolkit cannot fetch
+originals for it from iCloud, so `select` reports how many are missing from it.
+osxphotos only reads the library. Do not open an older library in Photos just
+for this: Photos would upgrade it in place.
+
+```bash
+ls /Volumes
+diskutil list external
+find /Volumes -maxdepth 4 -name "*.photoslibrary" -type d 2>/dev/null
+likeness people --library "/Volumes/DRIVE/Photos Library.photoslibrary"
+```
+
 ### Storage (`pull` / `release`)
 
 `pull` exports full-resolution copies of just the selected photos into the

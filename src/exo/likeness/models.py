@@ -46,6 +46,8 @@ class PhotoCandidate(FrozenModel):
 
 class SelectionSettings(FrozenModel):
     person_name: str
+    # None means the library Photos is using; otherwise a .photoslibrary path.
+    library_path: str | None = None
     earliest_capture: datetime | None
     target_count: int = Field(ge=1)
     minimum_short_side_pixels: int = 1024

@@ -205,22 +205,28 @@ def _osxphotos_command() -> list[str]:
 def build_pull_command(
     uuid_list_file: Path, destination: Path, library_path: Path | None
 ) -> list[str]:
+    """iCloud downloads go through Photos itself, so they only work for the library
+    Photos is using; a library on another drive is copied from as-is."""
     command = [
         *_osxphotos_command(),
         "export",
         str(destination),
         "--uuid-from-file",
         str(uuid_list_file),
-        "--download-missing",
-        "--use-photokit",
-        "--convert-to-jpeg",
-        "--jpeg-quality",
-        "0.95",
-        "--skip-live",
-        "--skip-raw",
-        "--filename",
-        "{uuid}",
     ]
+    if library_path is None:
+        command.extend(["--download-missing", "--use-photokit"])
+    command.extend(
+        [
+            "--convert-to-jpeg",
+            "--jpeg-quality",
+            "0.95",
+            "--skip-live",
+            "--skip-raw",
+            "--filename",
+            "{uuid}",
+        ]
+    )
     if library_path is not None:
         command.extend(["--library", str(library_path)])
     return command

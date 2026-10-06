@@ -100,6 +100,9 @@ def command_select(arguments: _Arguments) -> None:
     workspace = _workspace(arguments)
     settings = SelectionSettings(
         person_name=arguments.person,
+        library_path=None
+        if arguments.library is None
+        else str(arguments.library.expanduser().resolve()),
         earliest_capture=_earliest_capture(arguments),
         target_count=arguments.target,
     )
@@ -139,9 +142,16 @@ def command_select(arguments: _Arguments) -> None:
         + ", ".join(f"{name} {count}" for name, count in angles.items())
         + f" | favorites {sum(photo.is_favorite for photo in result.selected)}"
     )
-    print(
-        f"Originals already on this Mac: {len(result.selected) - to_download}; to download from iCloud: {to_download}"
-    )
+    if arguments.library is None:
+        print(
+            f"Originals already on this Mac: {len(result.selected) - to_download}; "
+            f"to download from iCloud: {to_download}"
+        )
+    else:
+        print(
+            f"Originals present in {arguments.library}: {len(result.selected) - to_download}; "
+            f"missing from it (cannot be pulled): {to_download}"
+        )
     for photo in result.selected[: arguments.show]:
         print(
             f"  {photo.ranking_score:.3f}  {photo.captured_at:%Y-%m-%d}  "
@@ -163,12 +173,20 @@ def command_pull(arguments: _Arguments) -> None:
         photo.uuid for photo in manifest.selected if photo.uuid not in already_pulled
     ]
     pulled = {uuid: manifest.pulled_files[uuid] for uuid in already_pulled}
+    library = arguments.library or (
+        Path(manifest.settings.library_path) if manifest.settings.library_path else None
+    )
     if wanted:
         print(
-            f"Pulling {len(wanted)} originals (downloading from iCloud where needed)..."
+            f"Pulling {len(wanted)} originals "
+            + (
+                "(downloading from iCloud where needed)..."
+                if library is None
+                else f"from {library}..."
+            )
         )
         for uuid, path in pull_originals(
-            wanted, workspace.originals_directory, arguments.library
+            wanted, workspace.originals_directory, library
         ).items():
             pulled[uuid] = path.name
     workspace.save_manifest(manifest.model_copy(update={"pulled_files": pulled}))
