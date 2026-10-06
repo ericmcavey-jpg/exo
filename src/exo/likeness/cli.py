@@ -75,7 +75,7 @@ class _Arguments(argparse.Namespace):
     edit_model: str
     exo_url: str
     launch_model: bool
-    megapixels: float
+    megapixels: float | None
     final_short_edge: int | None
     quality: str | None
     seed: int
@@ -408,7 +408,7 @@ def command_enhance(arguments: _Arguments) -> None:
             output_directory=output_directory,
             effects=effects,
             base_seed=arguments.seed,
-            target_megapixels=arguments.megapixels,
+            target_megapixels=arguments.megapixels or recipe.working_megapixels,
             final_short_edge=arguments.final_short_edge,
             keep_intermediates=arguments.keep_intermediates,
         )
@@ -510,7 +510,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Launch the edit model in exo if it is not running",
     )
     enhance.add_argument(
-        "--megapixels", type=float, default=1.0, help="Working size for edits"
+        "--megapixels",
+        type=float,
+        default=None,
+        help="Working size (default: 1 MP for recipes that edit, 6 MP for clarity)",
     )
     enhance.add_argument(
         "--final-short-edge",

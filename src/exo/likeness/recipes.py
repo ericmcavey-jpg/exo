@@ -53,6 +53,8 @@ class Recipe(FrozenModel):
     steps: list[RecipeStep]
     identity: IdentityPolicy
     final_short_edge: int | None = 2048
+    # Editing models work best near 1 MP; restoration alone can work on more pixels.
+    working_megapixels: float = 1.0
 
 
 REALISTIC_IDENTITY: Final = IdentityPolicy(enforce=True)
@@ -60,12 +62,14 @@ STYLIZED_IDENTITY: Final = IdentityPolicy(enforce=False, require_face=False)
 
 
 def _realistic(name: str, summary: str, *steps: RestoreStep | EditStep) -> Recipe:
+    has_edits = any(isinstance(step, EditStep) for step in steps)
     return Recipe(
         name=name,
         summary=summary,
         style="realistic",
         steps=list(steps),
         identity=REALISTIC_IDENTITY,
+        working_megapixels=1.0 if has_edits else 6.0,
     )
 
 

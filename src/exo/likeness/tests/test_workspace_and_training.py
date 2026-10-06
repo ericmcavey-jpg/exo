@@ -99,6 +99,7 @@ def test_geometry():
     assert width % 16 == 0 and height % 16 == 0
     assert 0.9e6 < width * height < 1.1e6
     assert abs(width / height - 4 / 3) < 0.02
+    assert working_dimensions(800, 608, 6.0) == (800, 608)  # never enlarged
     assert fit_long_edge(800, 600, 1536) == (800, 600)
     assert fit_long_edge(4000, 3000, 1000) == (1000, 750)
 
@@ -112,6 +113,8 @@ def test_recipes_lock_identity_only_for_realistic_looks():
         else:
             assert not recipe.identity.enforce
         assert Recipe.model_validate_json(recipe.model_dump_json()) == recipe
+    assert RECIPES["clarity"].working_megapixels == 6.0
+    assert RECIPES["polish"].working_megapixels == 1.0
 
 
 def test_training_config_follows_the_mflux_example(tmp_path: Path):

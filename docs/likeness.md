@@ -106,7 +106,8 @@ low; there is no supported way to force it sooner.
 
 ### Enhancement (`enhance`)
 
-Each recipe works at about 1 MP (`--megapixels`). It sharpens and de-noises with
+Recipes that edit work at about 1 MP, and `clarity` at about 6 MP (`--megapixels`
+to change; photos are never enlarged before restoration). Each recipe sharpens and de-noises with
 SeedVR2, applies edits through exo's `/v1/images/edits` (default
 `exolabs/Qwen-Image-Edit-2509-8bit`, change with `--edit-model`), and finishes
 with a SeedVR2 upscale to a 2048 px short edge (`--final-short-edge`, 0 to skip).
