@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import final
 
 from exo.likeness.enhance import EnhancementEffects, enhance_image
-from exo.likeness.exo_client import DEFAULT_EDIT_MODEL, ExoImageEditor
+from exo.likeness.exo_client import DEFAULT_EDIT_MODEL, ExoImageEditor, ExoRequestError
 from exo.likeness.identity import (
     InsightFaceEmbedder,
     ReferenceIdentityScorer,
@@ -41,7 +41,7 @@ from exo.likeness.photo_library import (
     pull_originals,
 )
 from exo.likeness.recipes import RECIPES, EditStep, Recipe
-from exo.likeness.restoration import SeedVR2Restorer
+from exo.likeness.restoration import InsufficientMemoryError, SeedVR2Restorer
 from exo.likeness.selection import select_photos
 from exo.likeness.training import export_latest_adapter, write_dataset
 from exo.likeness.workspace import (
@@ -81,6 +81,8 @@ class _Arguments(argparse.Namespace):
     seed: int
     keep_intermediates: bool
     seedvr2_model: str
+    low_ram: bool
+    min_free_memory_gb: float
 
 
 def _workspace(arguments: _Arguments, task_name: str | None = None) -> TaskWorkspace:
@@ -389,7 +391,9 @@ def command_enhance(arguments: _Arguments) -> None:
         restorer=SeedVR2Restorer(
             model="seedvr2-7b"
             if arguments.seedvr2_model == "seedvr2-7b"
-            else "seedvr2-3b"
+            else "seedvr2-3b",
+            low_ram=arguments.low_ram,
+            minimum_free_gigabytes=arguments.min_free_memory_gb,
         ),
         images=PillowImageOperations(),
         identity=identity,
@@ -527,6 +531,17 @@ def build_parser() -> argparse.ArgumentParser:
     enhance.add_argument(
         "--seedvr2-model", choices=["seedvr2-3b", "seedvr2-7b"], default="seedvr2-3b"
     )
+    enhance.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Run SeedVR2 in mflux's low-memory mode (slower)",
+    )
+    enhance.add_argument(
+        "--min-free-memory-gb",
+        type=float,
+        default=32.0,
+        help="Refuse to start SeedVR2 with less free memory than this (0 disables)",
+    )
     return parser
 
 
@@ -549,6 +564,12 @@ def main() -> None:
     arguments = build_parser().parse_args(namespace=_Arguments())
     try:
         COMMANDS[arguments.command](arguments)
-    except (PhotosLibraryUnavailableError, FileNotFoundError, ValueError) as error:
+    except (
+        PhotosLibraryUnavailableError,
+        InsufficientMemoryError,
+        ExoRequestError,
+        FileNotFoundError,
+        ValueError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1) from error

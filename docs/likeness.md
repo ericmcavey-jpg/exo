@@ -113,6 +113,12 @@ SeedVR2, applies edits through exo's `/v1/images/edits` (default
 with a SeedVR2 upscale to a 2048 px short edge (`--final-short-edge`, 0 to skip).
 Pass `--launch-model` to have exo load the edit model if it is not running.
 
+**Memory.** SeedVR2 runs on the GPU alongside whatever exo has loaded. Running it
+under memory pressure can stall the GPU badly enough that macOS restarts (a "SoC
+watchdog reset" panic). `enhance` therefore refuses to start SeedVR2 when less
+than 32 GB is free (`--min-free-memory-gb`, 0 disables). `--low-ram` runs it in
+mflux's slower low-memory mode, and a smaller `--megapixels` lowers the load too.
+
 | Recipe | Style | What it does |
 |---|---|---|
 | `clarity` | realistic | Sharpen, de-noise, upscale. No retouching. |
