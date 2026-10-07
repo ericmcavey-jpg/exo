@@ -31,6 +31,8 @@ class IdentityPolicy(FrozenModel):
     enforce: bool
     minimum_similarity: float = 0.45
     maximum_drop: float = 0.10
+    # Restoration should only sharpen, so it gets a tighter tolerance than edits.
+    maximum_restoration_drop: float = 0.05
     require_face: bool = True
 
 

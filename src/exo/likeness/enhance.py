@@ -132,6 +132,70 @@ def _run_edit_step(
     return current
 
 
+def _run_restore(
+    *,
+    kind: Literal["restore", "final"],
+    step_number: int,
+    current: Path,
+    destination: Path,
+    short_edge: int,
+    softness: float,
+    base_seed: int,
+    effects: EnhancementEffects,
+    policy: IdentityPolicy,
+    records: list[StepRecord],
+) -> Path:
+    """Restore/upscale with SeedVR2, keeping the previous image if your face drifted.
+
+    Judged against the image going in, so an edit's accepted change is not counted
+    again here: this pass only has to leave the face as it found it.
+    """
+    similarity_before = _score(effects, current)
+    candidate = effects.restorer.restore(
+        source=current,
+        destination=destination,
+        short_edge=short_edge,
+        softness=softness,
+        seed=base_seed,
+    )
+    restoration_policy = policy.model_copy(
+        update={"maximum_drop": policy.maximum_restoration_drop}
+    )
+    verdict = (
+        None
+        if effects.identity is None
+        else judge_identity(
+            restoration_policy, similarity_before, _score(effects, candidate)
+        )
+    )
+    action = f"restored with SeedVR2 at a {short_edge}px short edge"
+    if verdict is None or verdict.accepted:
+        records.append(
+            StepRecord(
+                step_number=step_number,
+                kind=kind,
+                attempt=1,
+                seed=base_seed,
+                accepted=True,
+                verdict=verdict,
+                note=action,
+            )
+        )
+        return candidate
+    records.append(
+        StepRecord(
+            step_number=step_number,
+            kind=kind,
+            attempt=1,
+            seed=base_seed,
+            accepted=False,
+            verdict=verdict,
+            note=f"{action}, but {verdict.reason}; kept the image from before this step",
+        )
+    )
+    return current
+
+
 def enhance_image(
     *,
     source: Path,
@@ -154,26 +218,34 @@ def enhance_image(
     source_similarity = _score(effects, working)
     records: list[StepRecord] = []
     current = working
+    upscale_to = (
+        recipe.final_short_edge if final_short_edge is None else final_short_edge
+    )
+    upscale_done = False
 
     for step_number, step in enumerate(recipe.steps, start=1):
         if isinstance(step, RestoreStep):
-            current = effects.restorer.restore(
-                source=current,
+            short_edge = step.short_edge or effects.images.short_edge(current)
+            # Each SeedVR2 pass changes the face a little, so a restore that ends the
+            # recipe also does the final upscale in the same pass.
+            if (
+                step_number == len(recipe.steps)
+                and upscale_to
+                and upscale_to > short_edge
+            ):
+                short_edge = upscale_to
+                upscale_done = True
+            current = _run_restore(
+                kind="restore",
+                step_number=step_number,
+                current=current,
                 destination=output_directory / f"{step_number:02d}-restore.png",
-                short_edge=step.short_edge or effects.images.short_edge(current),
+                short_edge=short_edge,
                 softness=step.softness,
-                seed=base_seed,
-            )
-            records.append(
-                StepRecord(
-                    step_number=step_number,
-                    kind="restore",
-                    attempt=1,
-                    seed=base_seed,
-                    accepted=True,
-                    verdict=None,
-                    note="restored with SeedVR2",
-                )
+                base_seed=base_seed,
+                effects=effects,
+                policy=policy,
+                records=records,
             )
         else:
             current = _run_edit_step(
@@ -188,31 +260,25 @@ def enhance_image(
                 records=records,
             )
 
-    final_path = output_directory / "final.png"
-    upscale_to = (
-        recipe.final_short_edge if final_short_edge is None else final_short_edge
-    )
-    if upscale_to and upscale_to > effects.images.short_edge(current):
-        effects.restorer.restore(
-            source=current,
-            destination=final_path,
+    if (
+        not upscale_done
+        and upscale_to
+        and upscale_to > effects.images.short_edge(current)
+    ):
+        current = _run_restore(
+            kind="final",
+            step_number=len(recipe.steps) + 1,
+            current=current,
+            destination=output_directory / "99-upscale.png",
             short_edge=upscale_to,
             softness=0.0,
-            seed=base_seed,
+            base_seed=base_seed,
+            effects=effects,
+            policy=policy,
+            records=records,
         )
-        records.append(
-            StepRecord(
-                step_number=len(recipe.steps) + 1,
-                kind="final",
-                attempt=1,
-                seed=base_seed,
-                accepted=True,
-                verdict=None,
-                note=f"upscaled with SeedVR2 to a {upscale_to}px short edge",
-            )
-        )
-    else:
-        shutil.copyfile(current, final_path)
+    final_path = output_directory / "final.png"
+    shutil.copyfile(current, final_path)
 
     report = EnhancementReport(
         recipe=recipe.name,

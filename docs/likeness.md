@@ -135,7 +135,10 @@ mflux's slower low-memory mode, and a smaller `--megapixels` lowers the load too
 with your face reference. An edit must stay within 0.10 of the unedited
 photo's similarity score, and above 0.45 when the source photo itself reaches
 that. An edit that drifts is retried with a new seed, and skipped if it still
-drifts. Stylized recipes only report the similarity. `report.json` in each output
+drifts. SeedVR2 passes are checked too, more strictly (a 0.05 drop against the
+image going in), and a pass that changes your face is discarded. A restore that
+ends a recipe does the final upscale in the same pass, since every pass can shift
+the face a little. Stylized recipes only report the similarity. `report.json` in each output
 folder records every attempt. Pass `--keep-intermediates` to keep the
 step-by-step images.
 

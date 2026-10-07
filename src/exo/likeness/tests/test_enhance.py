@@ -137,3 +137,42 @@ def test_upscale_can_be_skipped_and_intermediates_kept(tmp_path: Path):
     assert restorer.calls == [768]  # only the restore step, no final upscale
     assert (tmp_path / "out" / "final.png").read_text() == "edit1"
     assert (tmp_path / "out" / "00-working.png").exists()
+
+
+def clarity_like_recipe() -> Recipe:
+    return Recipe(
+        name="clarity-test",
+        summary="",
+        style="realistic",
+        steps=[RestoreStep()],
+        identity=IdentityPolicy(enforce=True),
+        final_short_edge=2048,
+    )
+
+
+def test_restore_that_ends_a_recipe_upscales_in_one_pass(tmp_path: Path):
+    restorer = FakeRestorer()
+    run(tmp_path, clarity_like_recipe(), FakeIdentity({}), restorer)
+    assert restorer.calls == [2048]
+    assert (tmp_path / "out" / "final.png").read_text() == "restored(source)"
+
+
+def test_restoration_that_drifts_from_your_face_is_dropped(tmp_path: Path):
+    # Source scores 0.80; restoring drops it to 0.72, beyond the 0.05 tolerance.
+    report = run(
+        tmp_path, clarity_like_recipe(), FakeIdentity({"restored(source)": 0.72})
+    )
+    assert not report.steps[0].accepted
+    assert "kept the image from before this step" in report.steps[0].note
+    assert (tmp_path / "out" / "final.png").read_text() == "source"
+
+
+def test_upscale_is_judged_against_the_edit_not_the_original(tmp_path: Path):
+    # The edit costs 0.08 (allowed for edits); a faithful upscale then costs 0.01.
+    report = run(
+        tmp_path,
+        realistic_recipe(),
+        FakeIdentity({"edit1": 0.72, "restored(edit1)": 0.71}),
+    )
+    assert all(step.accepted for step in report.steps)
+    assert (tmp_path / "out" / "final.png").read_text() == "restored(edit1)"
