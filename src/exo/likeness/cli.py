@@ -23,7 +23,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import final
 
-from exo.likeness.enhance import EnhancementEffects, enhance_image
+from exo.likeness.enhance import (
+    EnhancementEffects,
+    RestorationOptions,
+    enhance_image,
+)
 from exo.likeness.exo_client import DEFAULT_EDIT_MODEL, ExoImageEditor, ExoRequestError
 from exo.likeness.identity import (
     InsightFaceEmbedder,
@@ -43,6 +47,7 @@ from exo.likeness.photo_library import (
 from exo.likeness.recipes import RECIPES, EditStep, Recipe
 from exo.likeness.restoration import InsufficientMemoryError, SeedVR2Restorer
 from exo.likeness.selection import select_photos
+from exo.likeness.texture import DEFAULT_MINIMUM_ACUTANCE
 from exo.likeness.training import export_latest_adapter, write_dataset
 from exo.likeness.workspace import (
     TaskWorkspace,
@@ -83,6 +88,8 @@ class _Arguments(argparse.Namespace):
     seedvr2_model: str
     low_ram: bool
     min_free_memory_gb: float
+    texture_strength: float
+    sharp_threshold: float
 
 
 def _workspace(arguments: _Arguments, task_name: str | None = None) -> TaskWorkspace:
@@ -415,6 +422,12 @@ def command_enhance(arguments: _Arguments) -> None:
             target_megapixels=arguments.megapixels or recipe.working_megapixels,
             final_short_edge=arguments.final_short_edge,
             keep_intermediates=arguments.keep_intermediates,
+            restoration=RestorationOptions(
+                texture_strength=arguments.texture_strength,
+                minimum_acutance=arguments.sharp_threshold
+                if arguments.sharp_threshold > 0
+                else None,
+            ),
         )
         rejected = sum(1 for step in report.steps if not step.accepted)
         similarity = (
@@ -517,13 +530,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--megapixels",
         type=float,
         default=None,
-        help="Working size (default: 1 MP for recipes that edit, 6 MP for clarity)",
+        help=(
+            "Working size; photos are reduced to this, never enlarged (default: 1 MP "
+            "for recipes that edit, 6 MP for clarity; 0 keeps the native size)"
+        ),
     )
     enhance.add_argument(
         "--final-short-edge",
         type=int,
         default=None,
-        help="Upscale target; 0 skips upscaling",
+        help=(
+            "Enlarge to this short edge at the end (default: 2048 for recipes that "
+            "edit, none for clarity; 0 skips)"
+        ),
     )
     enhance.add_argument("--quality", choices=["low", "medium", "high"], default=None)
     enhance.add_argument("--seed", type=int, default=7)
@@ -541,6 +560,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=32.0,
         help="Refuse to start SeedVR2 with less free memory than this (0 disables)",
+    )
+    enhance.add_argument(
+        "--texture-strength",
+        type=float,
+        default=RestorationOptions().texture_strength,
+        help=(
+            "How much of the photo's own fine texture and color to blend back into "
+            "SeedVR2's output: 0 keeps SeedVR2's, 1 only the photo's (default: 0.5)"
+        ),
+    )
+    enhance.add_argument(
+        "--sharp-threshold",
+        type=float,
+        default=DEFAULT_MINIMUM_ACUTANCE,
+        help=(
+            "Skip restoring photos whose face is at least this sharp (acutance, "
+            f"default: {DEFAULT_MINIMUM_ACUTANCE}); 0 always restores. "
+            "report.json records each photo's measurement"
+        ),
     )
     return parser
 

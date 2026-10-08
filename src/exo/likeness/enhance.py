@@ -1,5 +1,8 @@
 """Run a recipe on one photo: restore, edit with identity checks, then upscale.
 
+Restoration skips photos that are already sharp, and blends the input's own fine
+texture and colors back into SeedVR2's output so faces do not turn waxy.
+
 The pipeline is pure orchestration over injected effects (editor, restorer, image
 operations, identity scorer), so it can be tested without models or Pillow.
 """
@@ -9,8 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, final
 
+from exo.likeness.geometry import FaceBox
 from exo.likeness.identity import IdentityPolicy, IdentityVerdict, judge_identity
 from exo.likeness.recipes import EditStep, Recipe, RestoreStep
+from exo.likeness.texture import (
+    DEFAULT_MAXIMUM_NOISE,
+    DEFAULT_MINIMUM_ACUTANCE,
+    Sharpness,
+)
 from exo.utils.pydantic_ext import FrozenModel
 
 
@@ -39,9 +48,31 @@ class ImageOperations(Protocol):
 
     def short_edge(self, path: Path) -> int: ...
 
+    def measure_sharpness(self, path: Path, face: FaceBox | None) -> Sharpness: ...
+
+    def blend_texture(
+        self, *, restored: Path, reference: Path, destination: Path, strength: float
+    ) -> Path: ...
+
 
 class IdentityScorer(Protocol):
     def similarity(self, image_path: Path) -> float | None: ...
+
+    def face_box(self, image_path: Path) -> FaceBox | None: ...
+
+
+class RestorationOptions(FrozenModel):
+    """How SeedVR2 passes are applied.
+
+    `texture_strength` is how much of SeedVR2's finest detail is replaced with the
+    input's own (0 keeps SeedVR2's, 1 keeps only the input's). A restore that does
+    not enlarge is skipped when the face already measures at least
+    `minimum_acutance` sharp with at most `maximum_noise` grain; None always restores.
+    """
+
+    texture_strength: float = 0.5
+    minimum_acutance: float | None = DEFAULT_MINIMUM_ACUTANCE
+    maximum_noise: float = DEFAULT_MAXIMUM_NOISE
 
 
 @final
@@ -61,6 +92,7 @@ class StepRecord(FrozenModel):
     accepted: bool
     verdict: IdentityVerdict | None
     note: str
+    sharpness: Sharpness | None = None
 
 
 class EnhancementReport(FrozenModel):
@@ -143,6 +175,7 @@ def _run_restore(
     base_seed: int,
     effects: EnhancementEffects,
     policy: IdentityPolicy,
+    options: RestorationOptions,
     records: list[StepRecord],
 ) -> Path:
     """Restore/upscale with SeedVR2, keeping the previous image if your face drifted.
@@ -150,6 +183,30 @@ def _run_restore(
     Judged against the image going in, so an edit's accepted change is not counted
     again here: this pass only has to leave the face as it found it.
     """
+    sharpness: Sharpness | None = None
+    enlarging = short_edge > effects.images.short_edge(current)
+    if not enlarging and options.minimum_acutance is not None:
+        face = None if effects.identity is None else effects.identity.face_box(current)
+        sharpness = effects.images.measure_sharpness(current, face)
+        if sharpness.is_already_sharp(options.minimum_acutance, options.maximum_noise):
+            records.append(
+                StepRecord(
+                    step_number=step_number,
+                    kind=kind,
+                    attempt=1,
+                    seed=base_seed,
+                    accepted=True,
+                    verdict=None,
+                    note=(
+                        f"skipped SeedVR2: the {sharpness.measured_on} is already sharp "
+                        f"(acutance {sharpness.acutance:.3f} >= {options.minimum_acutance:.3f}, "
+                        f"noise {sharpness.noise:.1f} <= {options.maximum_noise:.1f})"
+                    ),
+                    sharpness=sharpness,
+                )
+            )
+            return current
+
     similarity_before = _score(effects, current)
     candidate = effects.restorer.restore(
         source=current,
@@ -158,6 +215,17 @@ def _run_restore(
         softness=softness,
         seed=base_seed,
     )
+    action = f"restored with SeedVR2 at a {short_edge}px short edge"
+    if options.texture_strength > 0:
+        candidate = effects.images.blend_texture(
+            restored=candidate,
+            reference=current,
+            destination=destination.with_name(f"{destination.stem}-texture.png"),
+            strength=options.texture_strength,
+        )
+        action += (
+            f", with {options.texture_strength:.0%} of the original's fine texture"
+        )
     restoration_policy = policy.model_copy(
         update={"maximum_drop": policy.maximum_restoration_drop}
     )
@@ -168,7 +236,6 @@ def _run_restore(
             restoration_policy, similarity_before, _score(effects, candidate)
         )
     )
-    action = f"restored with SeedVR2 at a {short_edge}px short edge"
     if verdict is None or verdict.accepted:
         records.append(
             StepRecord(
@@ -179,6 +246,7 @@ def _run_restore(
                 accepted=True,
                 verdict=verdict,
                 note=action,
+                sharpness=sharpness,
             )
         )
         return candidate
@@ -191,6 +259,7 @@ def _run_restore(
             accepted=False,
             verdict=verdict,
             note=f"{action}, but {verdict.reason}; kept the image from before this step",
+            sharpness=sharpness,
         )
     )
     return current
@@ -206,10 +275,12 @@ def enhance_image(
     target_megapixels: float = 1.0,
     final_short_edge: int | None = None,
     keep_intermediates: bool = False,
+    restoration: RestorationOptions | None = None,
 ) -> EnhancementReport:
     """Enhance `source` into `output_directory/final.png` and write `report.json` beside it."""
     output_directory.mkdir(parents=True, exist_ok=True)
     policy = recipe.identity
+    options = restoration or RestorationOptions()
     working = effects.images.prepare_working_copy(
         source=source,
         destination=output_directory / "00-working.png",
@@ -245,6 +316,7 @@ def enhance_image(
                 base_seed=base_seed,
                 effects=effects,
                 policy=policy,
+                options=options,
                 records=records,
             )
         else:
@@ -275,6 +347,7 @@ def enhance_image(
             base_seed=base_seed,
             effects=effects,
             policy=policy,
+            options=options,
             records=records,
         )
     final_path = output_directory / "final.png"

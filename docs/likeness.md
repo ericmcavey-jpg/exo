@@ -106,12 +106,34 @@ low; there is no supported way to force it sooner.
 
 ### Enhancement (`enhance`)
 
-Recipes that edit work at about 1 MP, and `clarity` at about 6 MP (`--megapixels`
-to change; photos are never enlarged before restoration). Each recipe sharpens and de-noises with
-SeedVR2, applies edits through exo's `/v1/images/edits` (default
-`exolabs/Qwen-Image-Edit-2509-8bit`, change with `--edit-model`), and finishes
-with a SeedVR2 upscale to a 2048 px short edge (`--final-short-edge`, 0 to skip).
-Pass `--launch-model` to have exo load the edit model if it is not running.
+Recipes that edit work at about 1 MP, apply edits through exo's
+`/v1/images/edits` (default `exolabs/Qwen-Image-Edit-2509-8bit`, change with
+`--edit-model`), and finish with a SeedVR2 upscale to a 2048 px short edge
+(`--final-short-edge`, 0 to skip). Pass `--launch-model` to have exo load the edit
+model if it is not running.
+
+`clarity` restores at the photo's own size, up to 6 MP (`--megapixels`; 0 keeps the
+full native size). It never enlarges, because an enlarged photo is mostly detail
+SeedVR2 invented. Pass `--final-short-edge 2048` to enlarge anyway.
+
+**Keeping restoration realistic.** SeedVR2 sharpens convincingly but repaints fine
+detail: skin turns waxy, beard hair turns into drawn strokes, and it can change
+colors such as eye color. Two safeguards apply to every SeedVR2 pass:
+
+- **Sharp photos are left alone.** Before a pass that does not enlarge, the face
+  (found with the identity reference; the whole photo without `--identity-task`)
+  is measured for edge sharpness and grain. At or above `--sharp-threshold`
+  (default 0.18), SeedVR2 is skipped. `report.json` records each measurement, so
+  you can tune the threshold; 0 always restores. Calibrated on iPhone photos:
+  crisp faces measured 0.19 to 0.28, soft ones 0.05 to 0.14.
+- **The photo's own texture is blended back.** After SeedVR2, the finest detail is
+  split off (frequency separation) and `--texture-strength` of SeedVR2's (default
+  0.5) is replaced with the photo's own. Colors always come from the photo, so
+  eye and skin color cannot drift. Use 0 for SeedVR2's output as is, and higher
+  values for a more natural, less retouched look.
+
+`--seedvr2-model seedvr2-7b` uses the larger SeedVR2 model, which is more faithful
+but needs more memory and time.
 
 **Memory.** SeedVR2 runs on the GPU alongside whatever exo has loaded. Running it
 under memory pressure can stall the GPU badly enough that macOS restarts (a "SoC

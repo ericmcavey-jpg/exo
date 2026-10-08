@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, final
 
+from exo.likeness.geometry import FaceBox
 from exo.utils.pydantic_ext import FrozenModel
 
 if TYPE_CHECKING:
@@ -47,6 +48,8 @@ class FaceEmbedder(Protocol):
     def name(self) -> str: ...
 
     def embed_largest_face(self, image_path: Path) -> list[float] | None: ...
+
+    def largest_face_box(self, image_path: Path) -> FaceBox | None: ...
 
 
 def normalize(vector: Sequence[float]) -> list[float]:
@@ -156,6 +159,9 @@ class ReferenceIdentityScorer:
             return None
         return round(cosine_similarity(embedding, self._reference), 4)
 
+    def face_box(self, image_path: Path) -> FaceBox | None:
+        return self._embedder.largest_face_box(image_path)
+
 
 class _DetectedFace(Protocol):
     @property
@@ -213,7 +219,8 @@ class InsightFaceEmbedder:
             self._analyzer = analyzer
         return self._analyzer
 
-    def embed_largest_face(self, image_path: Path) -> list[float] | None:
+    def _largest_face(self, image_path: Path) -> tuple[_DetectedFace, int] | None:
+        """The largest face and the padding added around the image before detection."""
         # Imported here so the scoring rules above stay usable without Pillow installed.
         import numpy as np
         from PIL import Image, ImageOps
@@ -227,5 +234,23 @@ class InsightFaceEmbedder:
         faces = self._load().get(pixels)
         if not faces:
             return None
-        largest = max(faces, key=_face_area)
-        return cast(list[float], largest.normed_embedding.astype(np.float64).tolist())
+        return max(faces, key=_face_area), border
+
+    def embed_largest_face(self, image_path: Path) -> list[float] | None:
+        import numpy as np
+
+        found = self._largest_face(image_path)
+        if found is None:
+            return None
+        face, _border = found
+        return cast(list[float], face.normed_embedding.astype(np.float64).tolist())
+
+    def largest_face_box(self, image_path: Path) -> FaceBox | None:
+        found = self._largest_face(image_path)
+        if found is None:
+            return None
+        face, border = found
+        left, top, right, bottom = cast(
+            list[float], face.bbox[:4].astype(float).tolist()
+        )
+        return (left - border, top - border, right - border, bottom - border)

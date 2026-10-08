@@ -1,5 +1,8 @@
 import math
 
+# (left, top, right, bottom) in pixels.
+FaceBox = tuple[float, float, float, float]
+
 
 def working_dimensions(
     width: int, height: int, target_megapixels: float, multiple: int = 16
@@ -9,10 +12,15 @@ def working_dimensions(
     Editing models run at the input's size, so a 48 MP phone photo is brought down to
     roughly 1 MP before editing; SeedVR2 restores the resolution at the end. Smaller
     photos are never enlarged here: SeedVR2 does the enlarging, which keeps detail.
+    A target of 0 or less keeps the native size.
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid image size {width}x{height}")
-    scale = min(1.0, math.sqrt(target_megapixels * 1_000_000 / (width * height)))
+    scale = (
+        1.0
+        if target_megapixels <= 0
+        else min(1.0, math.sqrt(target_megapixels * 1_000_000 / (width * height)))
+    )
 
     def snap(value: float) -> int:
         return max(multiple * 16, round(value / multiple) * multiple)

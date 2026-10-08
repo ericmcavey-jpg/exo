@@ -2,15 +2,27 @@ import shutil
 from pathlib import Path
 from typing import final
 
-from exo.likeness.enhance import EnhancementEffects, EnhancementReport, enhance_image
+from exo.likeness.enhance import (
+    EnhancementEffects,
+    EnhancementReport,
+    RestorationOptions,
+    enhance_image,
+)
+from exo.likeness.geometry import FaceBox
 from exo.likeness.identity import IdentityPolicy
 from exo.likeness.recipes import RECIPES, EditStep, Recipe, RestoreStep
+from exo.likeness.texture import Sharpness
 
 
 @final
 class FakeImages:
-    def __init__(self, short_edge: int = 768) -> None:
+    """Photos measure soft unless `acutance` says otherwise; blending copies the image."""
+
+    def __init__(self, short_edge: int = 768, acutance: float = 0.05) -> None:
         self._short_edge = short_edge
+        self._acutance = acutance
+        self.blends: list[float] = []
+        self.measured_faces: list[FaceBox | None] = []
 
     def prepare_working_copy(
         self, *, source: Path, destination: Path, target_megapixels: float
@@ -20,6 +32,17 @@ class FakeImages:
 
     def short_edge(self, path: Path) -> int:
         return self._short_edge
+
+    def measure_sharpness(self, path: Path, face: FaceBox | None) -> Sharpness:
+        self.measured_faces.append(face)
+        return Sharpness(acutance=self._acutance, noise=0.5, measured_on="face")
+
+    def blend_texture(
+        self, *, restored: Path, reference: Path, destination: Path, strength: float
+    ) -> Path:
+        self.blends.append(strength)
+        shutil.copyfile(restored, destination)
+        return destination
 
 
 @final
@@ -61,6 +84,9 @@ class FakeIdentity:
     def similarity(self, image_path: Path) -> float | None:
         return self._scores.get(image_path.read_text(), 0.80)
 
+    def face_box(self, image_path: Path) -> FaceBox | None:
+        return (10.0, 20.0, 110.0, 140.0)
+
 
 def realistic_recipe(attempts: int = 2) -> Recipe:
     return Recipe(
@@ -80,6 +106,8 @@ def run(
     restorer: FakeRestorer | None = None,
     final_short_edge: int | None = None,
     keep_intermediates: bool = False,
+    images: FakeImages | None = None,
+    restoration: RestorationOptions | None = None,
 ) -> EnhancementReport:
     source = tmp_path / "source.jpg"
     source.write_text("source")
@@ -90,11 +118,12 @@ def run(
         effects=EnhancementEffects(
             editor=FakeEditor(),
             restorer=restorer or FakeRestorer(),
-            images=FakeImages(),
+            images=images or FakeImages(),
             identity=identity,
         ),
         final_short_edge=final_short_edge,
         keep_intermediates=keep_intermediates,
+        restoration=restoration,
     )
 
 
@@ -176,3 +205,76 @@ def test_upscale_is_judged_against_the_edit_not_the_original(tmp_path: Path):
     )
     assert all(step.accepted for step in report.steps)
     assert (tmp_path / "out" / "final.png").read_text() == "restored(edit1)"
+
+
+def native_clarity_recipe() -> Recipe:
+    return RECIPES["clarity"]
+
+
+def test_clarity_restores_at_native_size_without_enlarging(tmp_path: Path):
+    restorer = FakeRestorer()
+    run(tmp_path, native_clarity_recipe(), FakeIdentity({}), restorer)
+    assert restorer.calls == [768]
+
+
+def test_sharp_photo_is_not_restored(tmp_path: Path):
+    restorer = FakeRestorer()
+    images = FakeImages(acutance=0.30)
+    report = run(
+        tmp_path, native_clarity_recipe(), FakeIdentity({}), restorer, images=images
+    )
+    assert restorer.calls == []
+    assert report.steps[0].note.startswith("skipped SeedVR2: the face is already sharp")
+    assert report.steps[0].sharpness is not None
+    assert images.measured_faces == [(10.0, 20.0, 110.0, 140.0)]
+    assert (tmp_path / "out" / "final.png").read_text() == "source"
+
+
+def test_sharp_photo_is_still_restored_when_skipping_is_off(tmp_path: Path):
+    restorer = FakeRestorer()
+    run(
+        tmp_path,
+        native_clarity_recipe(),
+        FakeIdentity({}),
+        restorer,
+        images=FakeImages(acutance=0.30),
+        restoration=RestorationOptions(minimum_acutance=None),
+    )
+    assert restorer.calls == [768]
+
+
+def test_enlarging_is_never_skipped_for_sharpness(tmp_path: Path):
+    restorer = FakeRestorer()
+    run(
+        tmp_path,
+        clarity_like_recipe(),
+        FakeIdentity({}),
+        restorer,
+        images=FakeImages(acutance=0.30),
+    )
+    assert restorer.calls == [2048]
+
+
+def test_restored_output_gets_the_original_texture_blended_back(tmp_path: Path):
+    images = FakeImages()
+    report = run(
+        tmp_path,
+        native_clarity_recipe(),
+        FakeIdentity({}),
+        images=images,
+        restoration=RestorationOptions(texture_strength=0.4),
+    )
+    assert images.blends == [0.4]
+    assert "40% of the original's fine texture" in report.steps[0].note
+
+
+def test_texture_blend_can_be_turned_off(tmp_path: Path):
+    images = FakeImages()
+    run(
+        tmp_path,
+        native_clarity_recipe(),
+        FakeIdentity({}),
+        images=images,
+        restoration=RestorationOptions(texture_strength=0),
+    )
+    assert images.blends == []

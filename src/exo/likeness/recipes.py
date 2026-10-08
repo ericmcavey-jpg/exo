@@ -70,6 +70,9 @@ def _realistic(name: str, summary: str, *steps: RestoreStep | EditStep) -> Recip
         steps=list(steps),
         identity=REALISTIC_IDENTITY,
         working_megapixels=1.0 if has_edits else 6.0,
+        # Edits run near 1 MP and need enlarging afterwards. Restoring alone keeps the
+        # photo's own size: enlarging makes SeedVR2 invent detail the camera never saw.
+        final_short_edge=2048 if has_edits else None,
     )
 
 
