@@ -39,6 +39,7 @@ likeness libraries                                # Photos libraries here and on
 likeness people                                   # your exact name as tagged in Photos
 likeness select --task me --person "Your Name"    # rank photos; downloads nothing
 likeness pull --task me                           # download only the chosen originals
+likeness exclude --task me 5593B398 --reason "AI image"   # rule a photo out for good
 likeness identity --task me                       # face reference for the identity check
 likeness enhance --recipe polish --identity-task me ~/Desktop/photo.jpg
 likeness enhance --recipe anime --from-task me    # stylize every pulled photo
@@ -91,6 +92,16 @@ and then `diskutil mountDisk diskN`.
 **Over SSH**, the Terminal app's Full Disk Access does not apply. On the Mac
 itself, open System Settings > General > Sharing, click (i) next to Remote
 Login, and turn on "Allow full disk access for remote users".
+
+### Ruling photos out (`exclude`)
+
+Photos tagged as you are not always photos of you: AI portraits, face-filter
+edits, photos of an ID card or of an old print. Glance through `originals/` after
+`pull` and exclude anything that is not a real camera photo of you, by file name
+or its first 8 characters. `exclude` deletes the pulled copy (the photo stays in
+your Photos library) and records the reason in the manifest, and `select` never
+picks it again. Then rebuild the face reference with `identity`, and re-run
+`select` and `pull` if you want replacements.
 
 ### Storage (`pull` / `release`)
 

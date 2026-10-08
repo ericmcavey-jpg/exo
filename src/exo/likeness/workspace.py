@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import Final, final
 
-from exo.likeness.models import IdentityReference, TaskManifest
+from exo.likeness.models import IdentityReference, PhotoUuid, TaskManifest
 
 TASK_NAME_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 RELEASED_FOLDERS: Final = ("originals", "training")
@@ -111,6 +111,46 @@ class TaskWorkspace:
             manifest = self.load_manifest()
             self.save_manifest(manifest.model_copy(update={"pulled_files": {}}))
         return freed
+
+    def exclude(self, identifiers: list[str], reason: str) -> list[PhotoUuid]:
+        """Rule photos out of the task for good and delete their pulled copies.
+
+        Identifiers are photo UUIDs or unique prefixes of at least 8 characters (the
+        pulled file names). Photos stay in your Photos library; `select` just never
+        picks them again. Returns the UUIDs excluded.
+        """
+        manifest = self.load_manifest()
+        known = {photo.uuid for photo in manifest.selected} | set(manifest.pulled_files)
+        uuids: list[PhotoUuid] = []
+        for identifier in identifiers:
+            prefix = identifier.strip().upper()
+            matches = [uuid for uuid in known if uuid.upper().startswith(prefix)]
+            if len(prefix) < 8 or len(matches) != 1:
+                raise ValueError(
+                    f"{identifier!r} does not identify exactly one photo in task "
+                    f"{self.task_name!r}; use at least 8 characters of a pulled file name."
+                )
+            uuids.append(matches[0])
+        for uuid in uuids:
+            filename = manifest.pulled_files.get(uuid)
+            if filename is not None:
+                (self.originals_directory / filename).unlink(missing_ok=True)
+        self.save_manifest(
+            manifest.model_copy(
+                update={
+                    "selected": [
+                        photo for photo in manifest.selected if photo.uuid not in uuids
+                    ],
+                    "pulled_files": {
+                        uuid: filename
+                        for uuid, filename in manifest.pulled_files.items()
+                        if uuid not in uuids
+                    },
+                    "excluded": manifest.excluded | {uuid: reason for uuid in uuids},
+                }
+            )
+        )
+        return uuids
 
     def disk_usage(self) -> dict[str, int]:
         return {

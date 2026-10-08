@@ -46,12 +46,19 @@ voice. The owner has confirmed it is his own library and likeness.
    held about 40 GB and left 24.5 GB free, below the 32 GB gate.
 
    Keep LoRA training on unrestored originals, which `train-prepare` already uses.
-1a. **Selection let non-photos through.** Of the 41 pulled: `F8A43F4B` and
-   `5593B398` are AI caricatures, `04312D95` and `83615D7B` are face-filter app
-   edits, `0AABF3AB` is a photo of an ID card, and `52671C89` and `4FA974FA` are
-   re-photographed prints or documents. They feed the identity reference and would
-   feed LoRA training. Exclude them and rebuild `identity`; consider filtering on
-   missing camera EXIF and document-like images in `select`.
+1a. **Non-photos excluded (2026-10-08).** Selection had let 7 non-photos through:
+   AI caricatures `F8A43F4B` and `5593B398`, face-filter edits `04312D95` and
+   `83615D7B`, an ID-card photo `0AABF3AB`, and re-photographed prints or
+   documents `52671C89` and `4FA974FA`. They were removed with the new
+   `likeness exclude` (recorded in the manifest, so `select` never picks them
+   again; backups in `manifest.before-exclude-20261008.json` and
+   `identity.before-exclude-20261008.json`). The identity reference was rebuilt
+   from 33 faces (it was 40); it is 0.996 cosine-similar to the old one.
+   The remaining 34 photos score 0.60 to 0.88 against it, with no outliers.
+   `3BE8ADF9` has no detectable face (profile, cut off at the edge). Not yet done:
+   re-running `select`/`pull` for 7 replacements, and an automatic non-photo
+   filter in `select` (for example, no camera EXIF).
+
 2. **`polish` and the other edit presets have not run yet.** They need exo running
    with `EXO_ENABLE_IMAGE_MODELS=true` and `exolabs/Qwen-Image-Edit-2509-8bit`
    (37 GB; `--launch-model` places it).

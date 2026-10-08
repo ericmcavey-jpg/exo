@@ -169,3 +169,13 @@ def test_background_people_are_allowed_but_companions_are_not():
     assert rejection_reason(background, rules) is None
     assert rejection_reason(companion, rules) == "other people in the photo"
     assert rejection_reason(no_face_sizes, rules) == "other people in the photo"
+
+
+def test_excluded_photos_are_never_selected():
+    photos = [
+        make_candidate(f"photo{index}", captured_at=START + timedelta(days=index))
+        for index in range(4)
+    ]
+    result = select_photos(photos, settings(target=4), excluded={"photo1"})
+    assert "photo1" not in {photo.uuid for photo in result.selected}
+    assert result.rejection_counts == {"excluded by you": 1}

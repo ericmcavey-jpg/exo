@@ -12,6 +12,7 @@ packages each command needs. Typical flow, on the Mac with the Photos library an
     likeness train-prepare --task me --trigger-word ohwx --subject-class man
     likeness train-run --task me                      # mflux LoRA training
     likeness train-export --task me                   # keep just the LoRA adapter
+    likeness exclude --task me 5593B398 --reason "AI image"  # never use this photo
     likeness release --task me                        # delete pulled photos + checkpoints
 """
 
@@ -89,6 +90,8 @@ class _Arguments(argparse.Namespace):
     low_ram: bool
     min_free_memory_gb: float
     texture_strength: float
+    photos: list[str]
+    reason: str
     sharp_threshold: float
 
 
@@ -153,13 +156,11 @@ def command_select(arguments: _Arguments) -> None:
             "`likeness people`, and tag yourself in Photos > People."
         )
         return
-    result = select_photos(candidates, settings)
+    previous = workspace.load_manifest() if workspace.manifest_path.exists() else None
+    excluded = {} if previous is None else previous.excluded
+    result = select_photos(candidates, settings, excluded)
     # Keep photos already pulled for this task so re-selecting does not copy them again.
-    previously_pulled = (
-        workspace.load_manifest().pulled_files
-        if workspace.manifest_path.exists()
-        else {}
-    )
+    previously_pulled = {} if previous is None else previous.pulled_files
     selected_uuids = {photo.uuid for photo in result.selected}
     workspace.save_manifest(
         TaskManifest(
@@ -173,6 +174,7 @@ def command_select(arguments: _Arguments) -> None:
                 if uuid in selected_uuids
                 and (workspace.originals_directory / filename).exists()
             },
+            excluded=excluded,
         )
     )
 
@@ -308,6 +310,23 @@ def command_train_export(arguments: _Arguments) -> None:
     )
     print(
         f"Free the photos and checkpoints with: likeness release --task {workspace.task_name}"
+    )
+
+
+def command_exclude(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    try:
+        excluded = workspace.exclude(arguments.photos, arguments.reason)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    manifest = workspace.load_manifest()
+    print(
+        f"Excluded {len(excluded)} photo(s) ({arguments.reason}); "
+        f"{len(manifest.excluded)} excluded in total, {len(manifest.selected)} still selected."
+    )
+    print(
+        f"Rebuild the face reference with `likeness identity --task {workspace.task_name}`. "
+        "Re-run `likeness select` and `likeness pull` to fill the gaps with other photos."
     )
 
 
@@ -501,6 +520,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--trigger-word", default="")
 
+    exclude = task_command(
+        "exclude", "Rule photos out of the task for good (not your library)"
+    )
+    exclude.add_argument(
+        "photos", nargs="+", help="Pulled file names or their first 8+ characters"
+    )
+    exclude.add_argument(
+        "--reason", required=True, help="Why, e.g. 'not a camera photo'"
+    )
+
     task_command("release", "Delete pulled photos, datasets and checkpoints")
     commands.add_parser("status", help="Disk use per task")
     commands.add_parser("recipes", help="List enhancement recipes")
@@ -591,6 +620,7 @@ COMMANDS = {
     "identity": command_identity,
     "train-prepare": command_train_prepare,
     "train-export": command_train_export,
+    "exclude": command_exclude,
     "release": command_release,
     "status": command_status,
     "recipes": command_recipes,

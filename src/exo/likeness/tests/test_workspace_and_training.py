@@ -187,3 +187,37 @@ def test_export_takes_the_newest_checkpoint(tmp_path: Path):
     adapter = export_latest_adapter(workspace)
     assert adapter.name == "me-0000500.safetensors"
     assert adapter.read_text() == "0000500"
+
+
+def test_excluded_photos_are_dropped_deleted_and_remembered(tmp_path: Path):
+    workspace = TaskWorkspace(tmp_path, "me")
+    manifest = manifest_with("AAAA1111-0000", "BBBB2222-0000")
+    keep, drop = manifest.selected[0].uuid, manifest.selected[1].uuid
+    workspace.originals_directory.mkdir(parents=True)
+    for uuid in (keep, drop):
+        (workspace.originals_directory / f"{uuid}.jpeg").write_text("photo")
+    workspace.save_manifest(
+        manifest.model_copy(
+            update={"pulled_files": {keep: f"{keep}.jpeg", drop: f"{drop}.jpeg"}}
+        )
+    )
+
+    assert workspace.exclude([drop[:8].lower()], "AI image") == [drop]
+
+    updated = workspace.load_manifest()
+    assert [photo.uuid for photo in updated.selected] == [keep]
+    assert set(updated.pulled_files) == {keep}
+    assert updated.excluded == {drop: "AI image"}
+    assert not (workspace.originals_directory / f"{drop}.jpeg").exists()
+    assert (workspace.originals_directory / f"{keep}.jpeg").exists()
+
+
+def test_exclude_refuses_short_or_unknown_identifiers(tmp_path: Path):
+    workspace = TaskWorkspace(tmp_path, "me")
+    workspace.save_manifest(manifest_with("AAAA1111-0000", "AAAA1111-0001"))
+    with pytest.raises(ValueError):
+        workspace.exclude(["AAAA1111"], "ambiguous")
+    with pytest.raises(ValueError):
+        workspace.exclude(["ABC"], "too short")
+    with pytest.raises(ValueError):
+        workspace.exclude(["ZZZZZZZZ"], "unknown")

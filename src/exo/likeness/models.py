@@ -80,6 +80,8 @@ class TaskManifest(FrozenModel):
     settings: SelectionSettings
     selected: list[SelectedPhoto]
     pulled_files: dict[PhotoUuid, str] = {}
+    # Photos you ruled out (uuid -> reason). `select` never picks them again.
+    excluded: dict[PhotoUuid, str] = {}
 
 
 class IdentityReference(FrozenModel):

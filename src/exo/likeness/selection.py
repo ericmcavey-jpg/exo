@@ -6,7 +6,7 @@ adapter reads from the local database, so ranking never downloads a photo.
 
 import math
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Final, final
@@ -208,12 +208,18 @@ def _pick_round_robin_by_angle(
 
 
 def select_photos(
-    candidates: Sequence[PhotoCandidate], settings: SelectionSettings
+    candidates: Sequence[PhotoCandidate],
+    settings: SelectionSettings,
+    excluded: Collection[str] = (),
 ) -> SelectionResult:
     rejection_counts: Counter[str] = Counter()
     eligible: list[SelectedPhoto] = []
     for candidate in candidates:
-        reason = rejection_reason(candidate, settings)
+        reason = (
+            "excluded by you"
+            if candidate.uuid in excluded
+            else rejection_reason(candidate, settings)
+        )
         if reason is None:
             eligible.append(_to_selected(candidate))
         else:
