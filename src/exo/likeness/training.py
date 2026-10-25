@@ -87,7 +87,10 @@ def build_training_config(
         "guidance": 0.0,
         "quantize": quantize,
         "max_resolution": 1024,
-        "low_ram": False,
+        # Frees MLX's buffer cache after every step. Without it the cache ratchets
+        # up until a preview step needs more: a 1024 px Z-Image run grew to 181 GB
+        # at step 250 and was killed for memory (m3c, 2026-10-25).
+        "low_ram": True,
         "training_loop": {
             "num_epochs": suggested_epochs(image_count),
             "batch_size": 1,

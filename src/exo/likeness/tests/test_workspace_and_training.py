@@ -233,3 +233,13 @@ def test_loss_plotting_is_not_run_every_step(tmp_path: Path):
     monitoring = config["monitoring"]
     assert isinstance(monitoring, dict)
     assert monitoring["plot_frequency"] >= 10
+
+
+def test_training_frees_the_mlx_cache_every_step(tmp_path: Path):
+    config = build_training_config(
+        data_directory=tmp_path / "data",
+        output_directory=tmp_path / "run",
+        image_count=34,
+        quantize=None,
+    )
+    assert config["low_ram"] is True
