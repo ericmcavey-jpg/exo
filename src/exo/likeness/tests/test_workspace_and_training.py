@@ -221,3 +221,15 @@ def test_exclude_refuses_short_or_unknown_identifiers(tmp_path: Path):
         workspace.exclude(["ABC"], "too short")
     with pytest.raises(ValueError):
         workspace.exclude(["ZZZZZZZZ"], "unknown")
+
+
+def test_loss_plotting_is_not_run_every_step(tmp_path: Path):
+    config = build_training_config(
+        data_directory=tmp_path / "data",
+        output_directory=tmp_path / "run",
+        image_count=34,
+        quantize=None,
+    )
+    monitoring = config["monitoring"]
+    assert isinstance(monitoring, dict)
+    assert monitoring["plot_frequency"] >= 10

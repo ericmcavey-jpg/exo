@@ -102,7 +102,10 @@ def build_training_config(
         "monitoring": {
             "preview_width": 896,
             "preview_height": 1152,
-            "plot_frequency": 1,
+            # mflux runs a full validation forward pass and redraws the loss plot at
+            # every plotted step; plotting every step made training ~5x slower
+            # (48.8 vs 10.3 s/step for Z-Image Turbo at 1024 px on an M3 Ultra).
+            "plot_frequency": 25,
             "generate_image_frequency": checkpoint_every,
         },
         "lora_layers": {"targets": lora_targets(rank)},
