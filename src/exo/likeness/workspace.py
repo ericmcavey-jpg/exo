@@ -116,21 +116,19 @@ class TaskWorkspace:
         """Rule photos out of the task for good and delete their pulled copies.
 
         Identifiers are photo UUIDs or unique prefixes of at least 8 characters (the
-        pulled file names). Photos stay in your Photos library; `select` just never
-        picks them again. Returns the UUIDs excluded.
+        pulled file names). A full UUID may also name a photo the task has never
+        selected, so it can be ruled out before `select` ever picks it. Photos stay
+        in your Photos library; `select` just never picks them again. Returns the
+        UUIDs excluded.
         """
         manifest = self.load_manifest()
         known = {photo.uuid for photo in manifest.selected} | set(manifest.pulled_files)
         uuids: list[PhotoUuid] = []
         for identifier in identifiers:
-            prefix = identifier.strip().upper()
-            matches = [uuid for uuid in known if uuid.upper().startswith(prefix)]
-            if len(prefix) < 8 or len(matches) != 1:
-                raise ValueError(
-                    f"{identifier!r} does not identify exactly one photo in task "
-                    f"{self.task_name!r}; use at least 8 characters of a pulled file name."
-                )
-            uuids.append(matches[0])
+            if FULL_UUID_PATTERN.fullmatch(identifier.strip()):
+                uuids.append(PhotoUuid(identifier.strip().upper()))
+                continue
+            uuids.append(_resolve_one(identifier, known, self.task_name))
         for uuid in uuids:
             filename = manifest.pulled_files.get(uuid)
             if filename is not None:
@@ -152,12 +150,69 @@ class TaskWorkspace:
         )
         return uuids
 
+    def adopt(self, source: "TaskWorkspace", identifiers: list[str]) -> list[PhotoUuid]:
+        """Add photos selected and pulled in another task (e.g. a scan) to this one.
+
+        Copies their selection records and pulled originals; refuses photos this task
+        has excluded. Returns the UUIDs added.
+        """
+        manifest = self.load_manifest()
+        source_manifest = source.load_manifest()
+        source_photos = {photo.uuid: photo for photo in source_manifest.selected}
+        uuids = [
+            _resolve_one(identifier, set(source_photos), source.task_name)
+            for identifier in identifiers
+        ]
+        refused = [uuid for uuid in uuids if uuid in manifest.excluded]
+        if refused:
+            raise ValueError(
+                f"Task {self.task_name!r} has excluded {', '.join(refused)}; not adding."
+            )
+        self.originals_directory.mkdir(parents=True, exist_ok=True)
+        selected = list(manifest.selected)
+        pulled = dict(manifest.pulled_files)
+        already = {photo.uuid for photo in selected}
+        for uuid in uuids:
+            filename = source_manifest.pulled_files.get(uuid)
+            if filename is None:
+                raise ValueError(
+                    f"{uuid} was not pulled in task {source.task_name!r}; run `likeness pull` there first."
+                )
+            shutil.copy2(
+                source.originals_directory / filename,
+                self.originals_directory / filename,
+            )
+            pulled[uuid] = filename
+            if uuid not in already:
+                selected.append(source_photos[uuid])
+        self.save_manifest(
+            manifest.model_copy(update={"selected": selected, "pulled_files": pulled})
+        )
+        return uuids
+
     def disk_usage(self) -> dict[str, int]:
         return {
             child.name: folder_size_bytes(child)
             for child in sorted(self.directory.iterdir())
             if child.is_dir()
         }
+
+
+FULL_UUID_PATTERN: Final = re.compile(
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
+
+
+def _resolve_one(identifier: str, known: set[PhotoUuid], task_name: str) -> PhotoUuid:
+    """The one known UUID that `identifier` (8+ leading characters) names."""
+    prefix = identifier.strip().upper()
+    matches = [uuid for uuid in known if uuid.upper().startswith(prefix)]
+    if len(prefix) < 8 or len(matches) != 1:
+        raise ValueError(
+            f"{identifier!r} does not identify exactly one photo in task "
+            f"{task_name!r}; use at least 8 characters of a pulled file name."
+        )
+    return matches[0]
 
 
 def list_workspaces(home: Path) -> list[TaskWorkspace]:

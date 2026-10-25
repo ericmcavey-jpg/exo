@@ -103,6 +103,12 @@ your Photos library) and records the reason in the manifest, and `select` never
 picks it again. Then rebuild the face reference with `identity`, and re-run
 `select` and `pull` if you want replacements.
 
+To rule out a photo the task has never picked, pass its full UUID. To bring in
+photos found by a wider scan (a separate task, e.g. `select --task me-scan --years 4`
+then `pull --task me-scan`), use
+`likeness add --task me --from-task me-scan 38650B0D ...`; it copies their records
+and pulled files, and refuses anything the task has excluded.
+
 ### Storage (`pull` / `release`)
 
 `pull` exports full-resolution copies of just the selected photos into the

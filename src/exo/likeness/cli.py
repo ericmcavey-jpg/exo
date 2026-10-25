@@ -330,6 +330,25 @@ def command_exclude(arguments: _Arguments) -> None:
     )
 
 
+def command_add(arguments: _Arguments) -> None:
+    workspace = _workspace(arguments)
+    try:
+        added = workspace.adopt(
+            _workspace(arguments, arguments.from_task), arguments.photos
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    manifest = workspace.load_manifest()
+    print(
+        f"Added {len(added)} photo(s) from task {arguments.from_task!r}; "
+        f"{len(manifest.selected)} now selected."
+    )
+    print(
+        f"Rebuild the face reference with `likeness identity --task {workspace.task_name}` "
+        f"and the dataset with `likeness train-prepare --task {workspace.task_name} ...`."
+    )
+
+
 def command_release(arguments: _Arguments) -> None:
     workspace = _workspace(arguments)
     freed = workspace.release()
@@ -530,6 +549,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason", required=True, help="Why, e.g. 'not a camera photo'"
     )
 
+    add = task_command("add", "Add photos pulled in another task (e.g. a scan)")
+    add.add_argument(
+        "--from-task", required=True, help="Task the photos were pulled in"
+    )
+    add.add_argument(
+        "photos", nargs="+", help="Pulled file names or their first 8+ characters"
+    )
+
     task_command("release", "Delete pulled photos, datasets and checkpoints")
     commands.add_parser("status", help="Disk use per task")
     commands.add_parser("recipes", help="List enhancement recipes")
@@ -621,6 +648,7 @@ COMMANDS = {
     "train-prepare": command_train_prepare,
     "train-export": command_train_export,
     "exclude": command_exclude,
+    "add": command_add,
     "release": command_release,
     "status": command_status,
     "recipes": command_recipes,

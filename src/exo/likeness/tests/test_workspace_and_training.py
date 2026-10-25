@@ -243,3 +243,54 @@ def test_training_frees_the_mlx_cache_every_step(tmp_path: Path):
         quantize=None,
     )
     assert config["low_ram"] is True
+
+
+def test_a_full_uuid_can_be_excluded_before_it_is_ever_selected(tmp_path: Path):
+    workspace = TaskWorkspace(tmp_path, "me")
+    workspace.save_manifest(manifest_with("AAAA1111-0000"))
+    stranger = "9C51B0B1-1234-4ABC-8DEF-0123456789AB"
+    assert workspace.exclude([stranger.lower()], "photo of an ID card") == [stranger]
+    assert workspace.load_manifest().excluded == {stranger: "photo of an ID card"}
+
+
+def test_photos_are_added_from_another_task_with_their_files(tmp_path: Path):
+    scan = TaskWorkspace(tmp_path, "scan")
+    keep, other = "BBBB2222-0000", "CCCC3333-0000"
+    scan.originals_directory.mkdir(parents=True)
+    for uuid in (keep, other):
+        (scan.originals_directory / f"{uuid}.jpeg").write_text(uuid)
+    scan.save_manifest(
+        manifest_with(
+            keep,
+            other,
+            pulled={
+                PhotoUuid(keep): f"{keep}.jpeg",
+                PhotoUuid(other): f"{other}.jpeg",
+            },
+        )
+    )
+    me = TaskWorkspace(tmp_path, "me")
+    me.save_manifest(manifest_with("AAAA1111-0000"))
+
+    assert me.adopt(scan, ["bbbb2222"]) == [keep]
+
+    manifest = me.load_manifest()
+    assert [photo.uuid for photo in manifest.selected] == ["AAAA1111-0000", keep]
+    assert manifest.pulled_files == {keep: f"{keep}.jpeg"}
+    assert (me.originals_directory / f"{keep}.jpeg").read_text() == keep
+
+
+def test_excluded_photos_cannot_be_added_back(tmp_path: Path):
+    scan = TaskWorkspace(tmp_path, "scan")
+    uuid = "BBBB2222-0000"
+    scan.originals_directory.mkdir(parents=True)
+    (scan.originals_directory / f"{uuid}.jpeg").write_text(uuid)
+    scan.save_manifest(manifest_with(uuid, pulled={PhotoUuid(uuid): f"{uuid}.jpeg"}))
+    me = TaskWorkspace(tmp_path, "me")
+    me.save_manifest(
+        manifest_with("AAAA1111-0000").model_copy(
+            update={"excluded": {PhotoUuid(uuid): "AI image"}}
+        )
+    )
+    with pytest.raises(ValueError):
+        me.adopt(scan, [uuid])
