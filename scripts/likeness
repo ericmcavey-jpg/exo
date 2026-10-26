@@ -4,7 +4,7 @@
 # Adds only the optional packages each command needs, on top of this checkout's
 # environment, without changing exo's own dependencies:
 #   people, select, pull   -> osxphotos
-#   identity               -> insightface, onnxruntime, pillow
+#   identity, import       -> insightface, onnxruntime, pillow
 #   enhance                -> insightface, onnxruntime, pillow, mflux (SeedVR2)
 #   train-prepare          -> pillow
 #   train-run              -> mflux (runs mflux-train on the task's train.json)
@@ -61,7 +61,7 @@ mflux_packages=(--with "mflux==$MFLUX_VERSION")
 
 case "$command_name" in
   people | select | pull) extra_packages=("${photos_packages[@]}") ;;
-  identity) extra_packages=("${face_packages[@]}") ;;
+  identity | import) extra_packages=("${face_packages[@]}") ;;
   enhance) extra_packages=("${face_packages[@]}" "${mflux_packages[@]}") ;;
   train-prepare) extra_packages=(--with pillow) ;;
   train-run)
