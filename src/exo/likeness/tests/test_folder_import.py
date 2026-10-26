@@ -39,7 +39,7 @@ def test_import_selects_photos_with_faces_and_copies_them(tmp_path: Path) -> Non
     )
     workspace = TaskWorkspace(tmp_path / "home", "lisa")
     inspector = FakeInspector(
-        {"a.JPG": face(400), "b.jpg": face(150, yaw=0.6), "c.jpg": None}
+        {"a.JPG": face(900), "b.jpg": face(450, yaw=0.6), "c.jpg": None}
     )
 
     result = import_folder(

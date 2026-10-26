@@ -32,6 +32,10 @@ IMAGE_SUFFIXES: Final = frozenset({".jpg", ".jpeg", ".png", ".heic"})
 IMPORT_NAMESPACE: Final = uuid.UUID("6f1c2d0e-5b7a-4e8f-9c3d-2a1b0e9f8d7c")
 EXIF_IFD: Final = 0x8769
 DATE_TIME_ORIGINAL: Final = 0x9003
+# InsightFace boxes run larger than Photos' faces. Calibrated on 51 photos Photos had
+# labelled: box side / long side was 0.375+ for close-ups, 0.17 to 0.41 for medium
+# shots and under 0.15 for wide ones, so 2/3 of it lands on Photos' 0.25 and 0.10 cuts.
+PHOTOS_FACE_SIZE_SCALE: Final = 2 / 3
 
 
 class FoundFace(FrozenModel):
@@ -42,12 +46,12 @@ class FoundFace(FrozenModel):
 
     @property
     def relative_size(self) -> float:
-        """Face size as a share of the image's short side, like Photos' face size."""
+        """Face size on the same scale as Photos' face size, so framing thresholds apply."""
         left, top, right, bottom = self.box
-        short_side = min(self.image_width, self.image_height)
-        if short_side <= 0:
+        long_side = max(self.image_width, self.image_height)
+        if long_side <= 0:
             return 0.0
-        return max(right - left, bottom - top) / short_side
+        return PHOTOS_FACE_SIZE_SCALE * max(right - left, bottom - top) / long_side
 
 
 class PhotoInspector(Protocol):
