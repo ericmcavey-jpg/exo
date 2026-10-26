@@ -254,3 +254,20 @@ class InsightFaceEmbedder:
             list[float], face.bbox[:4].astype(float).tolist()
         )
         return (left - border, top - border, right - border, bottom - border)
+
+    def largest_face_box_and_yaw(
+        self, image_path: Path
+    ) -> tuple[FaceBox, float | None] | None:
+        """The largest face's box and head turn (yaw, radians) when the pose model ran."""
+        found = self._largest_face(image_path)
+        if found is None:
+            return None
+        face, border = found
+        left, top, right, bottom = cast(
+            list[float], face.bbox[:4].astype(float).tolist()
+        )
+        box = (left - border, top - border, right - border, bottom - border)
+        pose = cast("npt.NDArray[np.float32] | None", getattr(face, "pose", None))
+        if pose is None:
+            return box, None
+        return box, math.radians(float(cast(list[float], pose.tolist())[1]))

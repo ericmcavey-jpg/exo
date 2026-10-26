@@ -13,6 +13,7 @@ packages each command needs. Typical flow, on the Mac with the Photos library an
     likeness train-run --task me                      # mflux LoRA training
     likeness train-export --task me                   # keep just the LoRA adapter
     likeness exclude --task me 5593B398 --reason "AI image"  # never use this photo
+    likeness import --task lisa --person Lisa ~/Photos-from-Lisa  # photos sent as files
     likeness release --task me                        # delete pulled photos + checkpoints
 """
 
@@ -93,6 +94,7 @@ class _Arguments(argparse.Namespace):
     photos: list[str]
     reason: str
     sharp_threshold: float
+    folder: Path
 
 
 def _workspace(arguments: _Arguments, task_name: str | None = None) -> TaskWorkspace:
@@ -311,6 +313,33 @@ def command_train_export(arguments: _Arguments) -> None:
     print(
         f"Free the photos and checkpoints with: likeness release --task {workspace.task_name}"
     )
+
+
+def command_import(arguments: _Arguments) -> None:
+    from exo.likeness.folder_import import InsightFacePhotoInspector, import_folder
+
+    folder = arguments.folder.expanduser()
+    if not folder.is_dir():
+        raise SystemExit(f"No such folder: {folder}")
+    workspace = _workspace(arguments)
+    result = import_folder(
+        workspace=workspace,
+        folder=folder,
+        person_name=arguments.person,
+        inspector=InsightFacePhotoInspector(InsightFaceEmbedder()),
+    )
+    manifest = workspace.load_manifest()
+    print(
+        f"Imported {len(result.imported)} photo(s); {len(manifest.selected)} in the task now."
+    )
+    for label, names in (
+        ("Already in the task (same file)", result.already_in_task),
+        ("Excluded earlier", result.excluded),
+        ("No face found, skipped", result.without_face),
+    ):
+        if names:
+            print(f"{label}: {', '.join(names)}")
+    print(f"Next: likeness identity --task {workspace.task_name}")
 
 
 def command_exclude(arguments: _Arguments) -> None:
@@ -549,6 +578,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason", required=True, help="Why, e.g. 'not a camera photo'"
     )
 
+    import_command = task_command(
+        "import", "Start or extend a task from a folder of photo files"
+    )
+    import_command.add_argument("folder", type=Path)
+    import_command.add_argument(
+        "--person", required=True, help="Who is in the photos, e.g. 'Lisa'"
+    )
+
     add = task_command("add", "Add photos pulled in another task (e.g. a scan)")
     add.add_argument(
         "--from-task", required=True, help="Task the photos were pulled in"
@@ -649,6 +686,7 @@ COMMANDS = {
     "train-export": command_train_export,
     "exclude": command_exclude,
     "add": command_add,
+    "import": command_import,
     "release": command_release,
     "status": command_status,
     "recipes": command_recipes,
